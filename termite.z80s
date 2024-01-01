@@ -1,0 +1,6048 @@
+;SAM Coupé RS232 Modem Software
+;------------------------------
+
+;(c) 1994 Simon Cooke
+
+scrollpage:    EQU  3
+ansi.esc1:     EQU  27
+ansi.esc2:     EQU  "["
+def.colour:    EQU  %00000111
+maxyline:      EQU  23
+maxx:          EQU  79
+cr:            EQU  13
+lf:            EQU  10
+tab:           EQU  9
+bs:            EQU  8
+c0:            EQU  0
+c2:            EQU  %01010101
+c1:            EQU  %10101010
+c3:            EQU  %11111111
+editkey:       EQU  128
+tx.q:          EQU  &6800
+tx.lim:        EQU  &70
+rx.q:          EQU  &7000
+rx.lim:        EQU  &80
+rxoldq:        EQU  &6600
+;old data q - extends 7600-76FF
+font.data1:    EQU  &E000
+font.data2:    EQU  &E000+4096
+cint.init:     EQU  %00000101
+stacker:       EQU  &6800
+quote:         EQU  34
+topleftcorner: EQU  &D5
+toprightcorner:EQU  &B8
+botrightcorner:EQU  &BE
+botleftcorner: EQU  &D4
+horizbox:      EQU  &CD
+vertbox:       EQU  &B3
+lefttitle:     EQU  &B5
+righttitle:    EQU  &C6
+
+
+;SAM standard equates
+;--------------------
+
+tx.port:       EQU  &03
+rx.port:       EQU  tx.port
+lmpr:          EQU  &FA
+hmpr:          EQU  &FB
+vmpr:          EQU  &FC
+stat:          EQU  &F9
+keyport:       EQU  &FE
+
+;ASCII / KEYBOARD equates
+;------------------------
+
+NKY:           EQU  0
+INV:           EQU  "\"
+EDIT:          EQU  NKY
+SYM:           EQU  NKY
+CNTRL:         EQU  NKY
+SHIFT:         EQU  NKY
+F0:            EQU  128
+F1:            EQU  129
+F2:            EQU  130
+F3:            EQU  131
+F4:            EQU  132
+F5:            EQU  133
+F6:            EQU  134
+F7:            EQU  135
+F8:            EQU  136
+F9:            EQU  137
+UP:            EQU  138
+DOWN:          EQU  139
+LEFT:          EQU  140
+RIGHT:         EQU  141
+EXIT:          EQU  142
+RESET:         EQU  144
+SENDBREAK:     EQU  145
+WRAPMODE:      EQU  146
+SCRBCK:        EQU  147
+CHATMODE:      EQU  148
+SCRFLASH:      EQU  149
+SNDTOGL:       EQU  150
+ECHOMODE:      EQU  151
+DEBUGMODE:     EQU  152
+;Debugger: ESC+SYM+EDIT
+HELP:          EQU  153
+;Help: EDIT+F1
+MANDIAL:       EQU  154
+;manual dialler
+PHBOOK:        EQU  155
+;phone book
+RESETCOMS:     EQU  143
+;******* OBSOLETE!
+SHLEFT:        EQU  156
+SHRIGHT:       EQU  157
+SHUP:          EQU  158
+SHDOWN:        EQU  159
+HOME:          EQU  160
+END:           EQU  161
+SHHOME:        EQU  164
+SHEND:         EQU  165
+PAGEUP:        EQU  162
+PAGEDOWN:      EQU  163
+CAPS:          EQU  6
+TAB:           EQU  9
+RETURN:        EQU  13
+SPACE:         EQU  32
+BACKSPACE:     EQU  8
+DELETE:        EQU  127
+QUOTES:        EQU  34
+COPYRIGHT:     EQU  "C"
+ESCAPE:        EQU  27
+NUL:           EQU  0
+SOH:           EQU  1
+STX:           EQU  2
+ETX:           EQU  3
+EOT:           EQU  4
+ENQ:           EQU  5
+ACK:           EQU  6
+BEL:           EQU  7
+BS:            EQU  8
+HT:            EQU  9
+LF:            EQU  10
+VT:            EQU  11
+FF:            EQU  12
+ff:            EQU  12
+CR:            EQU  13
+SO:            EQU  14
+SI:            EQU  15
+DLE:           EQU  16
+DC1:           EQU  17
+DC2:           EQU  18
+DC3:           EQU  19
+DC4:           EQU  20
+NAK:           EQU  21
+SYN:           EQU  22
+ETB:           EQU  23
+CAN:           EQU  24
+EM:            EQU  25
+SUBB:          EQU  26
+ESC:           EQU  27
+FS:            EQU  28
+GS:            EQU  29
+RS:            EQU  30
+US:            EQU  31
+
+;---------------------------------------------------------------
+
+;BASIC routines
+;--------------
+
+               ORG  0
+               DUMP 1,0
+
+start:
+               DI
+               IN   A,(lmpr)
+               LD   (lmpr.store+&8001),A
+               IN   A,(vmpr)
+               LD   (vmpr.store+&8001),A
+               LD   (sp.store+&8001),SP
+               LD   SP,stacker
+               LD   A,33
+               OUT  (lmpr),A
+               JP   jump.down
+
+
+;---------------------------------------------------------------
+
+;Interrupt Handler
+;-----------------
+
+               DEFS &0038-$
+
+int.exception:
+               PUSH AF
+               IN   A,(stat)
+               BIT  1,A
+               JP   Z,comms.int
+
+               BIT  3,A
+               JP   Z,frame.int
+
+exit.int:
+               POP  AF
+
+               EI
+               RET
+
+;Frame Interrupt
+;---------------
+
+frame.int:
+               LD   A,(int.test)
+               OR   A
+               JR   NZ,exit.int
+
+               CPL
+               LD   (int.test),A
+               EI
+
+               PUSH HL
+               PUSH BC
+               PUSH DE
+
+idletime:      LD   A,&00
+               INC  A
+               LD   (idletime+1),A
+
+cursorclk:     LD   A,0
+               INC  A
+               LD   (cursorclk+1),A
+
+               CALL mouse.read
+               CALL key.read
+               CALL inc.timer
+               LD   A,(bell.sound)
+               OR   A
+               JR   Z,normal.colour
+
+               DEC  A
+               LD   (bell.sound),A
+
+               LD   BC,&03F8
+               LD   A,(colour0)
+               OUT  (C),A
+               DEC  B
+               LD   A,(colour1)
+               OUT  (C),A
+               DEC  B
+               LD   A,(colour2)
+               OUT  (C),A
+               DEC  B
+               LD   A,(colour3)
+               OUT  (C),A
+               JR   resume
+
+normal.colour:
+               LD   BC,&00F8
+               LD   A,(colour0)
+               OUT  (C),A
+               INC  B
+               LD   A,(colour1)
+               OUT  (C),A
+               INC  B
+               LD   A,(colour2)
+               OUT  (C),A
+               INC  B
+               LD   A,(colour3)
+               OUT  (C),A
+resume:
+               LD   A,(fifotest)
+               OR   A
+               CALL NZ,fifounread
+;test for byte?
+
+               LD   A,&FF
+               LD   (fifotest),A
+;write it back...
+
+               POP  DE
+               POP  BC
+               POP  HL
+
+               DI
+               XOR  A
+               LD   (int.test),A
+
+               POP  AF
+               EI
+               RET
+
+fifounread:
+               LD   BC,(sr.port)
+               IN   A,(C)
+               RRA
+               RET  NC
+;if no data to be read, get-te
+
+               LD   DE,(rx.q.tail)
+               LD   HL,(rx.q.head)
+               INC  DE
+               LD   A,D
+               CP   rx.lim
+               JR   NZ,not.r.r.l8
+
+               LD   D,rx.q/256
+not.r.r.l8:
+               AND  A
+               SBC  HL,DE
+               LD   A,H
+               OR   L
+               RET  Z
+
+               LD   HL,(rx.q.tail)
+               LD   B,rx.port
+               IN   A,(C)
+               LD   (HL),A
+               INC  HL
+               LD   A,H
+               CP   rx.lim
+               JR   NZ,not.r.r.l9
+
+               LD   H,rx.q/256
+not.r.r.l9:
+               LD   (rx.q.tail),HL
+               RET
+
+mouse.read:
+inc.timer:     RET
+
+comms.int:
+               PUSH BC
+               LD   BC,(im.port)
+               IN   A,(C)
+               BIT  2,A
+               CALL NZ,rx.data
+               BIT  0,A
+               CALL NZ,tx.data
+               POP  BC
+               POP  AF
+               EI
+               RET
+
+tx.data:
+               PUSH AF
+               PUSH HL
+               PUSH DE
+               LD   HL,(tx.q.tail)
+               LD   DE,(tx.q.head)
+               LD   A,H
+               XOR  D
+               JR   NZ,datain
+               LD   A,L
+               XOR  E
+               JR   Z,exit.tx.off
+
+datain:
+               LD   A,(DE)
+;output data from queue
+               LD   B,tx.port
+               OUT  (C),A
+
+               INC  DE
+               LD   A,D
+               CP   tx.lim
+;reached queue wraparound point?
+               JR   NZ,not.r.t.l
+
+               LD   D,tx.q/256
+not.r.t.l:
+               LD   (tx.q.head),DE
+exit.tx.d:
+               POP  DE
+               POP  HL
+               POP  AF
+               RET
+
+exit.tx.off:
+               LD   A,(cint.mask)
+               AND  %11111100
+;clear TX interrupt masks
+               LD   (cint.mask),A
+;if no more data in queue
+               LD   B,&05
+;(re-enabled when more data
+               OUT  (C),A
+;arrives)
+               JR   exit.tx.d
+
+rx.data:
+               PUSH AF
+               PUSH HL
+               PUSH DE
+               LD   DE,(rx.q.tail)
+               LD   HL,(rx.q.head)
+               INC  DE
+               LD   A,D
+               CP   rx.lim
+               JR   NZ,not.r.r.l
+
+               LD   D,rx.q/256
+not.r.r.l:
+               AND  A
+               SBC  HL,DE
+               LD   A,H
+               OR   L
+               JR   Z,r.q.full
+
+               LD   HL,(rx.q.tail)
+               LD   B,rx.port
+               IN   A,(C)
+               LD   (HL),A
+               INC  HL
+               LD   A,H
+               CP   rx.lim
+               JR   NZ,not.r.r.l2
+
+               LD   H,rx.q/256
+not.r.r.l2:
+               LD   (rx.q.tail),HL
+
+               LD   DE,(rx.q.tail)
+               LD   HL,(rx.q.head)
+               INC  DE
+               LD   A,D
+               CP   rx.lim
+               JR   NZ,not.r.r.l3
+
+               LD   D,rx.q/256
+not.r.r.l3:
+               AND  A
+               SBC  HL,DE
+               LD   A,H
+               OR   L
+               JR   Z,r.q.full
+
+               LD   HL,(rx.q.tail)
+               LD   B,rx.port
+               IN   A,(C)
+               LD   (HL),A
+               INC  HL
+               LD   A,H
+               CP   rx.lim
+               JR   NZ,not.r.r.l4
+
+               LD   H,rx.q/256
+not.r.r.l4:
+               LD   (rx.q.tail),HL
+
+               LD   DE,(rx.q.tail)
+               LD   HL,(rx.q.head)
+               INC  DE
+               LD   A,D
+               CP   rx.lim
+               JR   NZ,not.r.r.l5
+
+               LD   D,rx.q/256
+not.r.r.l5:
+               AND  A
+               SBC  HL,DE
+               LD   A,H
+               OR   L
+               JR   Z,r.q.full
+
+               LD   HL,(rx.q.tail)
+               LD   B,rx.port
+               IN   A,(C)
+               LD   (HL),A
+               INC  HL
+               LD   A,H
+               CP   rx.lim
+               JR   NZ,not.r.r.l6
+
+               LD   H,rx.q/256
+not.r.r.l6:
+               LD   (rx.q.tail),HL
+r.int.exit:
+               XOR  A
+               LD   (fifotest),A
+
+               POP  DE
+               POP  HL
+               POP  AF
+               RET
+
+r.q.full:
+               LD   A,(cint.mask)
+;disable rxrdy interrupt
+               AND  %11111011
+               LD   (cint.mask),A
+               LD   B,&05
+               OUT  (C),A
+               JR   r.int.exit
+
+;---------------------------------------------------------------
+ret.to.basic:
+               XOR  A
+               IN   A,(&FE)
+               AND  %00011111
+               LD   C,A
+               XOR  A
+               IN   A,(&F9)
+               AND  %11100000
+               OR   C
+               CPL
+               OR   A
+               JR   NZ,ret.to.basic
+
+               XOR  A
+               LD   BC,(im.port)
+               OUT  (C),A
+               INC  A
+               OUT  (hmpr),A
+               JP   jump.up+&8000
+
+jump.up:
+sp.store:      LD   SP,&0000
+lmpr.store:    LD   A,&00
+               OUT  (lmpr),A
+vmpr.store:    LD   A,&00
+               OUT  (vmpr),A
+               EI
+               RET
+
+
+
+
+
+jump.down:
+               IN   A,(vmpr)
+               AND  %10011111
+;mode 3!
+               OR   %01000000
+               OUT  (vmpr),A
+               AND  31
+               OUT  (hmpr),A
+
+               XOR  A
+;initialise Frame_int_in_prog
+               LD   (int.test),A
+;ress flag
+               LD   IX,font6x8
+               LD   IY,make6x8
+               CALL makefont
+
+               LD   IX,colourtoreplc
+               LD   HL,colourtobexor ;make colours in
+               ;butterfly-print compatible format
+               LD   B,colournum
+colourxorl:
+               LD   E,(HL)
+               INC  HL
+               LD   D,(HL)
+               INC  HL
+               LD   A,D
+               XOR  E
+               LD   (IX),D
+               INC  IX
+               LD   (IX),A
+               INC  IX
+               DJNZ colourxorl
+
+               XOR  A
+               LD   (termflags),A
+               LD   (chatflags),A
+               LD   HL,tx.q
+               LD   (tx.q.head),HL
+;initialise tx and rx queues.
+               LD   (tx.q.tail),HL
+               LD   HL,rx.q
+               LD   (rx.q.head),HL
+               LD   (rx.q.tail),HL
+               LD   HL,rxoldq
+               LD   (receiveseenq),HL
+               LD   DE,rxoldq+1
+               LD   BC,255
+               LD   (HL),L
+               LDIR
+               LD   A,cint.init
+;initialise interrupt mask
+               LD   (cint.mask),A
+               CALL init.comms
+
+;Create mirror screen line offset table...
+
+               LD   HL,mirror.ltable
+;mirror screen line addrs
+               LD   DE,mirror.screen
+               LD   BC,80*3
+;offset to next line
+               LD   A,31
+mirltabmake.l:
+               LD   (HL),E
+               INC  HL
+               LD   (HL),D
+               INC  HL
+               EX   DE,HL
+               ADD  HL,BC
+               EX   DE,HL
+               DEC  A
+               JR   NZ,mirltabmake.l
+
+;              LD   HL,screen.ltable
+ ;             LD   DE,&8000
+;screen base address
+ ;             LD   BC,1024
+;no' of bytes per char line
+;(DONT FORGET TO VARY THIS FOR 6x6 FONTS,
+;6x7 FONTS, etc!!!)
+  ;            LD   A,31
+scrltabmake.l:
+  ;            LD   (HL),E
+  ;            INC  HL
+  ;            LD   (HL),D
+  ;            INC  HL
+  ;            EX   DE,HL
+  ;            ADD  HL,BC
+  ;            EX   DE,HL
+  ;            DEC  A
+  ;            JR   NZ,scrltabmake.l
+
+               EI
+               CALL init.ansi
+               CALL jjcode
+               XOR  A
+;no data in clipboard...
+               LD   (clipline.len),A
+               LD   (leftwindow),A
+               LD   (topwindow),A
+               LD   A,79
+               LD   (rightwindow),A
+               LD   A,23
+               LD   (bottomwindow),A
+
+               LD   A,255
+               LD   (cursorflag),A
+               CALL cursor
+               LD   HL,initstring
+               CALL tx.message
+;reset modem...
+
+               JR   main.loop
+reinit.vid:
+               CALL init.ansi
+               CALL jjcode
+               LD   A,255
+               LD   (cursorflag),A
+               CALL cursor
+
+main.loop:
+cursorover:    LD   A,0
+               OR   A
+               JR   NZ,cursover
+
+               LD   A,(idletime+1)
+               CP   5
+               JR   C,noprcursor
+
+               LD   A,5
+               LD   (idletime+1),A
+
+cursover:
+               LD   A,(cursorclk+1)
+               CP   10
+               JR   C,noprcursor
+
+cursover2:
+               CALL cursor
+               XOR  A
+               LD   (cursorover+1),A
+               LD   (cursorclk+1),A
+
+noprcursor:
+               LD   HL,chatflags
+               BIT  0,(HL)
+               JP   NZ,chatdoor
+;chat in progress if set!
+
+               CALL gdfrxq
+               PUSH AF
+               CALL C,put.ansi
+;if data read in, output it...
+               POP  AF
+
+
+               CALL getkey
+               JP   Z,main.loop
+
+               EX   AF,AF'
+               LD   A,1
+               LD   (cursorover+1),A
+               LD   A,9
+               LD   (cursorclk+1),A
+               EX   AF,AF'
+
+               CP   EXIT
+               JP   Z,ret.to.basic
+
+               CP   RESET
+               JP   Z,reinit.vid
+
+               CP   SENDBREAK
+               JP   Z,send.break
+
+               CP   WRAPMODE
+               JP   Z,wrap.mode
+
+;              CP   SCRBCK
+;             JP   Z,scrollbacktog
+
+               CP   CHATMODE
+;Run Chat Server
+               JP   Z,chatmodeon
+
+               CP   ECHOMODE
+;local echo toggle
+               JP   Z,localecho
+
+               CP   DEBUGMODE
+;actually is a toggle -
+               JP   Z,debugscrn
+;static display...
+
+               CP   HELP
+               JP   Z,helpsystem
+
+               CP   MANDIAL
+               JP   Z,manualdialler
+
+               CP   PHBOOK
+               JP   Z,phonebook
+
+               CP   SNDTOGL
+               JP   Z,soundtoggle
+;Sound On/Off
+
+               CP   SCRFLASH
+;Flash on/off
+               JP   Z,flashtoggle
+
+               CP   UP
+               JP   Z,upkey
+
+               CP   DOWN
+               JP   Z,downkey
+
+               CP   LEFT
+               JP   Z,leftkey
+
+               CP   RIGHT
+               JP   Z,rightkey
+
+               CALL put.data
+               JP   main.loop
+
+localecho:
+               LD   A,(termflags)
+               XOR  %00100000
+               LD   (termflags),A
+
+               PUSH AF
+
+               LD   HL,(coords)
+               LD   (winxystore),HL
+               LD   HL,(printcolour+1)
+               LD   (terminkstore),HL
+               CALL cursor_off
+
+               CALL infobox
+
+               LD   HL,(infoboxtext)
+               LD   (printcolour+1),HL
+
+               LD   HL,infoboxy+2*256+infoboxx+7
+               LD   (coords),HL
+
+               POP  AF
+
+               LD   HL,localecho_on
+               BIT  5,A
+               JR   NZ,loc1mesg
+
+               LD   HL,localecho_off
+
+loc1mesg:
+               CALL win.message
+
+               CALL waitinfo
+
+               CALL restore.screen
+
+               LD   HL,(winxystore)
+               LD   (coords),HL
+               LD   HL,(terminkstore)
+               LD   (printcolour+1),HL
+               JP   main.loop
+
+soundtoggle:
+               LD   A,(termflags)
+               XOR  1
+               LD   (termflags),A
+
+               PUSH AF
+               LD   HL,(coords)
+               LD   (winxystore),HL
+               LD   HL,(printcolour+1)
+               LD   (terminkstore),HL
+               CALL cursor_off
+
+               CALL infobox
+
+               LD   HL,(infoboxtext)
+               LD   (printcolour+1),HL
+
+               LD   HL,infoboxy+2*256+infoboxx+10
+               LD   (coords),HL
+
+               POP  AF
+
+               LD   HL,sound_on
+               BIT  0,A
+               JR   Z,sound1mesg
+
+               LD   HL,sound_off
+
+sound1mesg:
+               CALL win.message
+
+               CALL waitinfo
+
+               CALL restore.screen
+
+               LD   HL,(winxystore)
+               LD   (coords),HL
+               LD   HL,(terminkstore)
+               LD   (printcolour+1),HL
+
+               JP   main.loop
+
+
+waitinfo:
+               LD   A,(infojiffies) ;time to wait for info boxes
+waitfiftieths:
+               LD   D,A
+               XOR  A
+               LD   (cursorclk+1),A
+wait50sloop:
+               LD   HL,flags
+               BIT  5,(HL)
+               JR   NZ,endw50s
+
+               LD   A,(cursorclk+1)
+               CP   D
+               JR   NZ,wait50sloop
+               RET
+endw50s:
+               RES  5,(HL)
+               XOR  A
+               LD   (cursorclk+1),A
+               RET
+
+flashtoggle:
+               LD   A,(termflags)
+               XOR  %00000010
+               LD   (termflags),A
+
+               PUSH AF
+               LD   HL,(coords)
+               LD   (winxystore),HL
+               LD   HL,(printcolour+1)
+               LD   (terminkstore),HL
+               CALL cursor_off
+
+               CALL infobox
+
+               LD   HL,(infoboxtext)
+               LD   (printcolour+1),HL
+
+               LD   HL,infoboxy+2*256+infoboxx+2
+               LD   (coords),HL
+
+               POP  AF
+
+               LD   HL,flash_on
+               BIT  1,A
+               JR   NZ,flash1mesg
+
+               LD   HL,flash_off
+
+flash1mesg:
+               CALL win.message
+
+               CALL waitinfo
+
+               CALL restore.screen
+
+               LD   HL,(winxystore)
+               LD   (coords),HL
+               LD   HL,(terminkstore)
+               LD   (printcolour+1),HL
+               JP   main.loop
+
+;Toggle autowrap mode..
+wrap.mode:
+               LD   A,(termflags)
+               XOR  %10000000
+               LD   (termflags),A
+               JP   main.loop
+
+;Toggle scroll-back buffer on/off
+
+scrollbacktog:
+               LD   A,(termflags)
+               XOR  %01000000
+               LD   (termflags),A
+               BIT  6,A
+               JP   Z,main.loop
+;scroll-back off
+               JP   main.loop
+
+;Send a break
+
+send.break:
+               LD   BC,(cr.port)
+               LD   A,%01100000
+               OUT  (C),A
+               LD   BC,32768
+wloop:
+               DEC  BC
+               LD   A,B
+               OR   C
+               JR   NZ,wloop
+
+               LD   BC,(cr.port)
+               LD   A,%01110000
+               OUT  (C),A
+               JP   main.loop
+
+leftkey:
+               CALL put.esc
+               LD   A,"D"
+               CALL put.data
+               JP   main.loop
+
+rightkey:
+               CALL put.esc
+               LD   A,"C"
+               CALL put.data
+               JP   main.loop
+
+downkey:
+               CALL put.esc
+               LD   A,"A"
+               CALL put.data
+               JP   main.loop
+
+upkey:
+               CALL put.esc
+               LD   A,"B"
+               CALL put.data
+               JP   main.loop
+
+put.esc:
+               LD   A,ansi.esc1
+
+               CALL put.data
+               LD   A,ansi.esc2
+
+;Put data in TX queue... (if q is full, beep & return)
+
+put.data:
+               LD   HL,termflags
+               BIT  5,(HL)
+               PUSH AF
+               CALL NZ,put.ansi
+;echo to screen if necessary
+;?
+               POP  AF
+;local echo mode...
+put.data2:
+               LD   C,A
+               LD   DE,(tx.q.tail)
+               LD   HL,(tx.q.head)
+               INC  DE
+               LD   A,D
+               CP   tx.lim
+               JR   NZ,nrtl
+
+               LD   D,tx.q/256
+nrtl:
+               AND  A
+               SBC  HL,DE
+;is queue nearly full?
+;if so, ignore this TX
+
+               LD   A,H
+               OR   L
+               JR   NZ,roomintxq
+
+               CALL bell
+               RET
+
+roomintxq:
+               LD   HL,(tx.q.tail)
+               LD   (HL),C
+               INC  HL
+               LD   A,H
+               CP   tx.lim
+               JR   NZ,nrtxl
+
+               LD   H,tx.q/256
+nrtxl:
+               LD   (tx.q.tail),HL
+               LD   A,(cint.mask)
+               OR   1
+               LD   (cint.mask),A
+               LD   BC,(im.port)
+               OUT  (C),A
+               RET
+
+;Get data from RX queue
+;----------------------
+
+;Returns data in A, Carry = Set if data present, not set if not.
+;.
+
+gdfrxq:
+               PUSH DE
+               LD   HL,(rx.q.tail)
+               LD   DE,(rx.q.head)
+               AND  A
+               SBC  HL,DE
+               LD   A,H
+               OR   L
+               JR   Z,ndinrxq
+
+               EX   DE,HL
+               LD   E,(HL)
+               INC  HL
+               LD   A,H
+               CP   rx.lim
+               JR   NZ,not.reached.rl
+
+               LD   H,rx.q/256
+not.reached.rl:
+               LD   (rx.q.head),HL
+               LD   A,(cint.mask)
+               OR   %00000100
+               LD   (cint.mask),A
+               LD   BC,(im.port)
+               OUT  (C),A
+               XOR  A
+;data read in, so we reset the idle counter
+               LD   (idletime+1),A
+               LD   A,E
+
+filter.in:     AND  %11111111      ;mask incoming data!
+                          ;(strip any bits we want to...)
+               LD   DE,(receiveseenq)
+               INC  E
+               LD   (DE),A
+               LD   (receiveseenq),DE
+
+               SCF
+;carry flag set, A=data...
+               POP  DE
+               RET
+
+;no data in RXQ...
+
+ndinrxq:
+               XOR  A
+;carry flag reset, A=0.
+               POP  DE
+               RET
+
+
+;================================
+
+;Chat mode system - dumb version
+
+;================================
+
+
+;Initialise & run chat door... (set door mode here too?)
+
+chatmodeon:
+               LD   HL,dumbchat.msg
+;terminated with a null character...
+               CALL tx.message.e
+;transmit message, with local echo
+
+               LD   A," "
+
+               LD   HL,chatline.in
+               LD   DE,chatline.in+1
+               LD   BC,wrapcolumn*2-1
+;clear all of the chatline stores..
+               LD   (HL),A
+;with spaces...
+               LDIR
+
+               LD   HL,remotename
+               LD   DE,remotename+1
+               LD   C,maxname-1
+               LD   (HL),A
+               LDIR
+
+               INC  HL
+               INC  HL
+               INC  DE
+               INC  DE
+               LD   (HL),A
+               LD   C,maxname-1
+               LDIR
+
+               XOR  A
+;reset edit lines back to 0 length...
+               LD   (chatin.pos),A
+               LD   (chatout.pos),A
+               INC  A
+;chat is just starting
+               LD   (chatflags),A
+;(flags = %00000001)
+
+               LD   HL,chatline.in-1
+               LD   (chatin.adr),HL
+               LD   HL,chatline.out-1
+               LD   (chatout.adr),HL
+               LD   HL,localname
+               LD   (remotenm.ad),HL
+               LD   HL,localname
+               LD   (localnm.ad),HL
+
+               JP   main.loop
+
+;===============================================================
+;Termite Debugger screen - displays both queues, and the
+;"Recently read data" screen...  (all in hex & char codes...)
+;===============================================================
+
+phonebook:
+               LD   HL,(printcolour+1)
+               LD   (terminkstore),HL
+               LD   HL,(coords)
+               LD   (winxystore),HL
+
+               LD   A,(inboxcolour)
+               LD   (clear.col+1),A
+               CALL clear.screenm
+               LD   A,(defaulttty)
+               LD   (clear.col+1),A
+;clear screen...
+               LD   BC,phonebkh*256+phonebkw
+               LD   HL,phonebky*256+phonebkx
+               LD   DE,phonebktitle
+               CALL makebox
+;draw a box on the screen...
+
+phonebookl:
+               CALL getkey
+;wait for the exit key...
+               JP   Z,phonebookl
+
+               CP   PHBOOK
+;toggle out of it...
+               JP   Z,exitphbk
+
+               CP   ESCAPE
+;escape out of it...
+               JP   NZ,phonebookl
+
+exitphbk:
+               LD   HL,(terminkstore)
+               LD   (printcolour+1),HL
+               LD   HL,(winxystore)
+               LD   (coords),HL
+               CALL restore.screen
+               JP   main.loop
+
+manualdialler:
+               LD   HL,(printcolour+1)
+               LD   (terminkstore),HL
+               LD   HL,(coords)
+               LD   (winxystore),HL
+
+               LD   BC,mandialh*256+mandialw
+               LD   HL,mandialy*256+mandialx
+               LD   DE,mandialtitle
+               CALL makebox
+;draw a box on the screen...
+
+               LD   HL,mandialstatus
+               CALL put.bottombar
+
+               LD   A,(topwindow)
+               INC  A
+               LD   H,A
+               LD   A,(leftwindow)
+               INC  A
+               LD   L,A
+               LD   (coords),HL
+               LD   HL,(inboxcolour)
+               LD   (printcolour+1),HL
+               LD   HL,mandial1.msg
+               CALL win.message
+
+               LD   A,(mandialnumlen)
+;select whole string,
+               LD   (selectlen),A
+               XOR  A
+               LD   (selectpos),A
+
+               LD   HL,mandialnumber
+               LD   A,(mandialnumlen)
+               LD   C,A
+               LD   B,mandialmax
+               LD   DE,(coords)
+               CALL editline
+
+               CP   cr
+;if exits on a CR, we dial..
+               JR   Z,dialmandial
+abortmandial:
+exitmandial:
+               LD   HL,(terminkstore)
+               LD   (printcolour+1),HL
+               LD   HL,(winxystore)
+               LD   (coords),HL
+               CALL restore.screen
+;restores screen from mirror
+
+               JP   main.loop
+
+dialmandial:
+               LD   A,(editline.len)
+               OR   A
+               JR   Z,abortmandial
+;don't dial nulls...
+
+               LD   (mandialnumlen),A
+               LD   C,A
+               LD   DE,mandialnumber
+               LD   HL,editline.buf
+               LD   B,0
+               LDIR
+
+               LD   HL,dialprefix
+               CALL tx.message
+               LD   A,(mandialnumlen)
+               LD   B,A
+               LD   HL,mandialnumber
+               CALL tx.bytes
+               LD   HL,dialsuffix
+               CALL tx.message
+               CALL parse.dial
+               JP   exitmandial
+
+put.bottombar:
+               PUSH HL
+               LD   A,(bottomwindow)
+               LD   H,A
+               LD   A,(leftwindow)
+               LD   L,A
+               LD   (coords),HL
+               LD   HL,(boxcolour)
+               LD   (printcolour+1),HL
+               LD   A,lefttitle
+               CALL putinwindow
+               LD   HL,(statusnorm)
+               LD   (printcolour+1),HL
+               LD   A," "
+               CALL putinwindow
+               POP  HL
+               CALL win.message
+               LD   A," "
+               CALL putinwindow
+               LD   HL,(boxcolour)
+               LD   (printcolour+1),HL
+               LD   A,righttitle
+               CALL putinwindow
+               RET
+
+;Decode CONNECT/NOCARRIER/ETC strings
+parse.dial:
+               CALL getkey
+               JR   Z,nokeyprsdial
+
+               CP   ESCAPE
+               RET  Z
+
+               CP   MANDIAL
+               RET  Z
+
+nokeyprsdial:
+               CALL gdfrxq
+               JR   NC,parse.dial
+
+               LD   A,(receiveseenq)
+;"seen" receive q position
+               LD   E,A
+               LD   D,rxoldq/256
+               LD   HL,baddialstring
+               CALL checkq
+               RET  C
+
+               LD   HL,gooddialstring
+               CALL checkq
+               JP   NC,parse.dial
+
+flushrxqdial:
+               CALL gdfrxq
+               JR   NC,flushrxqdial
+
+               CP   lf
+               JR   NZ,flushrxqdial
+
+               RET
+
+checkq:
+               LD   C,E
+checkerl:
+               LD   A,(HL)
+               OR   A
+               JR   Z,match
+;matched it!
+
+               LD   A,(DE)
+               LD   B,A
+               DEC  E
+               LD   A,E
+               CP   C
+               JR   Z,nomatch
+;end of buffer...
+
+               LD   A,(HL)
+               INC  HL
+               CP   B
+               JR   Z,checkerl
+
+nomatch:
+;search for end of
+               LD   E,C
+nomatch2:
+               LD   A,(HL)
+;current string
+               INC  HL
+               OR   A
+               JR   NZ,nomatch2
+
+               LD   A,(HL)
+               OR   A
+               JR   NZ,checkerl
+
+               AND  A
+               RET
+match:
+               AND  A
+               SCF
+               RET
+
+helpsystem:
+               LD   HL,(printcolour+1)
+               LD   (terminkstore),HL
+               LD   HL,(coords)
+               LD   (winxystore),HL
+
+               CALL clear.screen
+;clear screen...
+               LD   BC,helpboxh*256+helpboxw
+               LD   HL,helpboxy*256+helpboxx
+               LD   DE,helptitle
+               CALL makebox
+;draw a box on the screen...
+
+               LD   HL,helpstatus
+               CALL put.bottombar
+helpkl:
+               CALL getkey
+;wait for the exit key...
+               JP   Z,helpkl
+
+               CP   HELP
+;toggle out of it...
+               JP   Z,exithelp
+
+               CP   ESCAPE
+;escape out of it...
+               JP   NZ,helpkl
+
+exithelp:
+               LD   HL,(terminkstore)
+               LD   (printcolour+1),HL
+               LD   HL,(winxystore)
+               LD   (coords),HL
+               CALL restore.screen
+               JP   main.loop
+
+debugscrn:
+               LD   HL,(printcolour+1)
+               LD   (terminkstore),HL
+               LD   HL,(coords)
+               LD   (winxystore),HL
+
+               LD   BC,debugboxh*256+debugboxw
+               LD   HL,debugboxy*256+debugboxx
+               LD   DE,debugtitle
+               CALL makebox
+;draw a box on the screen...
+
+
+               LD   A,(leftwindow)
+               INC  A
+               LD   (coords),A
+               LD   A,(topwindow)
+               INC  A
+               LD   (coords+1),A
+
+               LD   DE,(inboxcolour)
+               LD   (printcolour+1),DE
+
+               LD   DE,(coords)
+               PUSH DE
+               LD   HL,debugpoint
+               CALL win.message
+
+               LD   BC,64*256+4
+               LD   DE,(boldinbox)
+               LD   (printcolour+1),DE
+               LD   HL,(receiveseenq)
+               INC  L
+               POP  DE
+               INC  D
+chrl2.debug:
+               PUSH DE
+               PUSH BC
+               LD   (coords),DE
+chrl.debug:
+               LD   A,(HL)
+               PUSH HL
+               PUSH BC
+               CALL print.char
+               POP  BC
+               POP  HL
+               INC  L
+               LD   A,(coords)
+               INC  A
+               LD   (coords),A
+               DJNZ chrl.debug
+
+               POP  BC
+               POP  DE
+               INC  D
+               DEC  C
+               JR   NZ,chrl2.debug
+
+               LD   DE,(inboxcolour)
+               LD   (printcolour+1),DE
+
+               LD   HL,debugpoint2
+               CALL win.message
+
+debugkl:
+               CALL getkey
+;wait for the exit key...
+               JP   Z,debugkl
+
+               CP   DEBUGMODE
+;toggle out of it...
+               JP   Z,exitdebugger
+
+               CP   ESCAPE
+;escape out of it...
+               JP   NZ,debugkl
+
+exitdebugger:
+               LD   HL,(terminkstore)
+               LD   (printcolour+1),HL
+               LD   HL,(winxystore)
+               LD   (coords),HL
+               CALL restore.screen
+;restores screen from mirror
+
+               JP   main.loop
+restore.screen:
+               LD   HL,(coords)
+               LD   DE,(printcolour+1)
+               PUSH HL
+               PUSH DE
+               LD   HL,(winxy)
+               LD   (coords),HL
+               LD   BC,(winwh)
+               LD   IX,mirror.ltable
+               LD   A,H
+               ADD  A,A
+               LD   E,A
+               LD   D,0
+               ADD  IX,DE
+               LD   A,C
+               LD   (restloop+1),A
+               LD   A,L
+               LD   (coordstr+1),A
+
+restloop:      LD   C,80
+               LD   L,(IX)
+               INC  IX
+               LD   H,(IX)
+               INC  IX
+coordstr:      LD   A,&00
+               LD   (coords),A
+               LD   E,A
+               ADD  A,A
+               ADD  A,E
+               LD   E,A
+               LD   D,0
+               ADD  HL,DE
+charl.restore:
+               LD   A,(HL)
+               INC  HL
+               LD   E,(HL)
+               INC  HL
+               LD   D,(HL)
+               INC  HL
+               LD   (printcolour+1),DE
+               PUSH HL
+               PUSH BC
+               CALL print.char
+               POP  BC
+               POP  HL
+               LD   A,(coords)
+               INC  A
+               LD   (coords),A
+
+               DEC  C
+               JR   NZ,charl.restore
+
+               LD   A,(coords+1)
+               INC  A
+               LD   (coords+1),A
+               DJNZ restloop
+
+               POP  DE
+               LD   (printcolour+1),DE
+               POP  HL
+               LD   (coords),HL
+               RET
+
+clear.screenm:
+               LD   DE,(defaulttty)
+               LD   HL,mirror.screen
+               LD   (HL),0
+               INC  HL
+               LD   (HL),D
+               INC  HL
+               LD   (HL),E
+               LD   DE,mirror.screen+3
+               LD   BC,80*3*30-3
+               LDIR
+
+clear.screen:
+               LD   HL,&8000
+               LD   DE,&8001
+               LD   A,255
+               LD   (cursorflag),A
+clear.col:     LD   (HL),&00
+               LD   BC,24576
+               CALL ldiloop
+               RET
+;Prints a double bounded box around the screen, with title
+;Make it print a status bar/info bar at the bottom? hmmm...
+
+makebox:
+               PUSH HL
+               PUSH BC
+               PUSH DE
+               CALL cursor_off
+               POP  DE
+               POP  BC
+               POP  HL
+               LD   (winxy),HL
+               LD   (winwh),BC
+               PUSH HL
+               PUSH BC
+               INC  L
+               INC  H
+               LD   A,H
+;setup top of window coord
+               LD   (topwindow),A
+               LD   A,L
+               LD   (leftwindow),A
+;setup left of window coord
+               LD   A,C
+               CP   3
+               JP   NC,wideenoughbox
+
+               LD   A,3
+
+wideenoughbox:
+               DEC  A
+               DEC  A
+               ADD  A,L
+               CP   maxx+1
+               JP   C,offendscrwin
+
+               LD   A,maxx
+
+offendscrwin:
+;rightmost coordinate...
+               LD   (rightwindow),A
+
+               LD   A,B
+               CP   3
+               JP   NC,deepenoughbox
+
+               LD   A,3
+deepenoughbox:
+               DEC  A
+               DEC  A
+               ADD  A,H
+               CP   maxyline+1
+               JP   C,offbotscrwin
+
+               LD   A,maxyline
+offbotscrwin:
+               LD   (bottomwindow),A
+               POP  BC
+               POP  HL
+
+boxmakeloop:
+               PUSH HL
+               LD   (coords),HL
+
+               LD   HL,(boxcolour)
+               LD   (printcolour+1),HL
+;print top of box
+
+               PUSH BC
+               LD   B,6
+;corner,titlealign,space
+;TITLE,space,titlealign,horiz
+
+toploop:
+               DEC  C
+               JR   Z,righttopbox
+
+toploop2:
+               LD   A,B
+               CP   6
+               JR   Z,tlcornbox
+
+
+               CP   4
+               JR   Z,spacetitlbx
+               JR   NC,titleleftalbx
+
+               CP   2
+               JR   Z,spacetitlbx
+               JR   NC,puttitlebox
+
+               OR   A
+               JR   Z,horizbox2
+
+               LD   A,righttitle
+               JR   boxedge
+
+puttitlebox:
+               INC  B
+               LD   A,(DE)
+               INC  DE
+               OR   A
+               JR   NZ,titleboxedge
+               DEC  B
+               DEC  B
+               JR   toploop2
+titleleftalbx:
+               LD   A,lefttitle
+               JR   boxedge
+
+spacetitlbx:
+               LD   A," "
+               JR   titleboxedge
+
+tlcornbox:
+               LD   A,topleftcorner
+               JR   boxedge
+
+titleboxedge:
+               LD   HL,(titlecolour)
+               JR   putchartopbox
+
+horizbox2:
+               INC  B
+horizbox1:
+               LD   A,horizbox
+
+boxedge:
+               LD   HL,(boxcolour)
+putchartopbox:
+               LD   (printcolour+1),HL
+               DEC  B
+               PUSH DE
+               CALL prtinscreen
+               POP  DE
+               JR   toploop
+
+righttopbox:
+               LD   HL,(boxcolour)
+               LD   (printcolour+1),HL
+               LD   A,toprightcorner
+               CALL prtinscreen
+               POP  BC
+               POP  HL
+
+               DEC  B
+
+midboxloop:
+               LD   A,H
+;move down a line..
+               INC  A
+               CP   maxyline
+               JR   C,notoverbotbox
+
+               LD   A,maxyline
+notoverbotbox:
+               LD   H,A
+               LD   (coords),HL
+               DEC  B
+;hit the bottom already?
+               JP   Z,bottomlinebox
+
+               PUSH HL
+               PUSH BC
+               DEC  C
+               JR   Z,rightmidbox
+
+               LD   A,vertbox
+               LD   HL,(boxcolour)
+               CALL prtinscreen
+
+               LD   HL,(inboxcolour)
+               LD   (printcolour+1),HL
+internalmidbox:
+               DEC  C
+               JR   Z,rightmidbox
+
+               LD   A," "
+               CALL prtinscreen
+               JR   internalmidbox
+
+
+rightmidbox:
+               LD   A,vertbox
+               LD   HL,(boxcolour)
+               LD   (printcolour+1),HL
+               CALL prtinscreen
+               POP  BC
+               POP  HL
+               JR   midboxloop
+
+bottomlinebox:
+               LD   B,1
+botboxloop:
+               DEC  C
+               JR   Z,rightbotbox
+
+               LD   A,B
+               OR   A
+               JR   Z,botboxhoriz
+
+               LD   A,botleftcorner
+               JR   printbotbox
+
+botboxhoriz:
+               INC  B
+               LD   A,horizbox
+printbotbox:
+               DEC  B
+               CALL prtinscreen
+               JR   botboxloop
+
+rightbotbox:
+               LD   A,botrightcorner
+               CALL prtinscreen
+               RET
+
+prtinscreen:
+               PUSH AF
+               LD   A,(coords)
+               LD   (tempxcoord),A
+               CP   maxx+1
+               JP   C,notoffrightscr
+
+               LD   A,maxx
+notoffrightscr:
+               LD   (coords),A
+               POP  AF
+               PUSH BC
+               CALL print.char
+               POP  BC
+               LD   A,(tempxcoord)
+               INC  A
+               LD   (coords),A
+               RET
+
+putinwindow:
+               PUSH BC
+               PUSH AF
+               LD   A,(rightwindow)
+               INC  A
+               LD   B,A
+               LD   A,(coords)
+               LD   (tempxcoord),A
+               CP   B
+               JP   C,notoffrightwin
+
+               LD   A,(rightwindow)
+notoffrightwin:
+               LD   (coords),A
+               POP  AF
+               CALL print.char
+               LD   A,(tempxcoord)
+               INC  A
+               LD   (coords),A
+               POP  BC
+               RET
+
+win.message:
+               LD   A,(HL)
+               OR   A
+               RET  Z
+
+               PUSH HL
+               CALL putinwindow
+               POP  HL
+               INC  HL
+               JR   win.message
+
+infobox:
+               CALL cursor_off
+               LD   HL,infoboxxy
+               LD   (coords),HL
+               LD   (winxy),HL
+               LD   A,H
+               INC  A
+               LD   (topwindow),A
+               LD   A,L
+               INC  A
+               LD   (leftwindow),A
+               LD   BC,infoboxwh
+               LD   (winwh),BC
+               ADD  A,C
+               DEC  A
+               DEC  A
+               LD   (rightwindow),A
+               LD   A,H
+               ADD  A,B
+               DEC  A
+               LD   (bottomwindow),A
+
+               LD   HL,(infoboxcol)
+               LD   (printcolour+1),HL
+
+               DEC  C
+               DEC  C
+               LD   A,(infoboxtl)  ;info box top left graphic
+               PUSH BC
+               CALL print.char
+               POP  BC
+               LD   A,(xcoord)
+               INC  A
+               LD   (xcoord),A
+infoboxl1:
+               LD   A,(infoboxhl) ;info box horizontal
+               PUSH BC
+               CALL print.char
+               POP  BC
+               LD   A,(xcoord)
+               INC  A
+               LD   (xcoord),A
+               DEC  C
+               JR   NZ,infoboxl1
+
+               LD   A,(infoboxtr)  ;infobox top right graphic
+               PUSH BC
+               CALL print.char
+               POP  BC
+
+infoboxl2:
+               LD   C,infoboxwh\256-2
+               LD   A,(ycoord)
+               INC  A
+               LD   (ycoord),A
+               LD   A,infoboxxy\256
+               LD   (xcoord),A
+               DEC  B
+               JR   Z,infoboxbline
+
+               LD   A,(infoboxvl) ;info box vert bar
+               PUSH BC
+               CALL print.char
+               POP  BC
+infoboxl4:
+               LD   A,(xcoord)
+               INC  A
+               LD   (xcoord),A
+
+               LD   A," "
+               PUSH BC
+               CALL print.char
+               POP  BC
+               DEC  C
+               JR   NZ,infoboxl4
+
+               LD   A,(xcoord)
+               INC  A
+               LD   (xcoord),A
+
+               LD   A,(infoboxvl)
+               PUSH BC
+               CALL print.char
+               POP  BC
+               DJNZ infoboxl2
+
+               LD   C,infoboxwh\256-2
+               LD   A,(ycoord)
+               INC  A
+               LD   (ycoord),A
+               LD   A,infoboxxy/256
+               LD   (xcoord),A
+
+infoboxbline:
+               LD   A,(infoboxbl)  ;info box bot left graphic
+               PUSH BC
+               CALL print.char
+               POP  BC
+               LD   A,(xcoord)
+               INC  A
+               LD   (xcoord),A
+infoboxl3:
+               LD   A,(infoboxhl) ;info box horizontal
+               PUSH BC
+               CALL print.char
+               POP  BC
+               LD   A,(coords)
+               INC  A
+               LD   (coords),A
+               DEC  C
+               JR   NZ,infoboxl3
+
+               LD   A,(infoboxbr)  ;infobox bot right graphic
+               PUSH BC
+               CALL print.char
+               POP  BC
+
+               RET
+
+
+
+
+
+;Actual Chat Door routine...
+
+chatdoor:
+;are we at logon part of chat system?
+
+               LD   HL,chatflags
+               BIT  1,(HL)
+;if nz, we are in chat mode.
+               JP   NZ,chat.dumbchat
+
+;we're still logging in, so we require the users names...
+
+;=====================
+;Login To Chat Door...
+;=====================
+;Having separate routines makes it possible for us to
+;keep sign-on names constant during a session if necessary...
+
+;Set directions for editline routines, etc...
+
+               LD   HL,remote.show
+               LD   (shw.dumbchat+1),HL
+               LD   HL,local.show
+               LD   (out.dumbchat+1),HL
+               LD   HL,remotename-1
+               LD   (chatin.adr),HL
+               LD   HL,localname-1
+               LD   (chatout.adr),HL
+               LD   A,(chatin.pos)
+               LD   B,A
+               LD   A,(chatout.pos)
+               LD   (chatin.pos),A
+               LD   A,B
+               LD   (chatout.pos),A
+
+               LD   E,remoteflag
+               CALL gdfrxq
+               CALL C,prs.logindmch
+;call login parser...
+
+               LD   HL,localname-1
+               LD   (chatin.adr),HL
+               LD   HL,remotename-1
+               LD   (chatout.adr),HL
+               LD   A,(chatin.pos)
+               LD   B,A
+               LD   A,(chatout.pos)
+               LD   (chatin.pos),A
+               LD   A,B
+               LD   (chatout.pos),A
+
+               CALL getkey
+               JP   Z,main.loop
+;get keyboard data... and parse it..
+
+               CP   CHATMODE
+               JP   Z,abort.dumbchat
+
+               LD   HL,local.show
+               LD   (shw.dumbchat+1),HL
+               LD   HL,remote.show
+               LD   (out.dumbchat+1),HL
+               LD   E,localflag
+               CALL prs.logindmch
+               JP   main.loop
+
+abort2.dmch:
+               POP  HL
+;remove return address...
+abort.dumbchat:
+               XOR  A
+               LD   (chatflags),A
+
+;Send "Login aborted" message
+
+               LD   HL,abortdumbchat
+;message...
+               CALL tx.message.e
+               JP   main.loop
+
+;Parse logins...
+
+prs.logindmch:
+               CP   CAN
+;abort session
+               JP   Z,abort2.dmch
+
+               CP   EOT
+               JP   Z,abort2.dmch
+
+               CP   ETX
+               JP   Z,abort2.dmch
+
+               LD   HL,chatflags
+;have we already got a name?
+               EX   AF,AF'
+               LD   A,E
+;if so, ignore this...
+               AND  (HL)
+               RET  NZ
+;our "name flag" is already
+;set... so we're waiting...
+
+               EX   AF,AF'
+
+               CP   DELETE
+               JP   Z,del.dumbchat
+
+               CP   BACKSPACE
+               JP   Z,del.dumbchat
+
+               CP   cr
+;set name & wait for other?
+               JP   Z,setname.dmch
+
+               CP   32
+;invalid code?
+               RET  C
+
+               LD   C,A
+               LD   A,(chatin.pos)
+               CP   maxname
+               RET  NC
+;already typed all we can..
+
+               INC  A
+               LD   E,A
+               LD   (chatin.pos),A
+               LD   HL,(chatin.adr)
+               LD   D,0
+               ADD  HL,DE
+               LD   (HL),C
+               LD   A,C
+               PUSH AF
+               CALL shw.dumbchat
+;show the character...
+               POP  AF
+               RET
+
+setname.dmch:
+;we've done our name...
+               LD   A,(chatin.pos)
+               OR   A
+               JR   NZ,gtnm.dmch
+;check for null name...
+
+               INC  A
+               LD   (chatin.pos),A
+               LD   HL,(chatin.adr)
+               INC  HL
+               LD   (HL),"?"
+;no name entered - so ?
+
+gtnm.dmch:
+               LD   A,(chatflags)
+               OR   E
+               LD   (chatflags),A
+               BIT  5,A
+;check if someone else
+;beat us to it...
+               JP   NZ,both.logindmch
+;both have logged in now
+
+               SET  5,A
+;okay... we've beaten them!
+               LD   (chatflags),A
+
+;Send the other user the "hurry up" message...
+;first though, 8-chatout.pos no' of spaces...
+
+               LD   A,(chatout.pos)
+               LD   C,A
+               LD   A,8
+               SUB  C
+               LD   B,A
+;b now equals no' of spaces to print
+               PUSH AF
+               JR   Z,rest.logindmch
+;possibly none...
+
+               LD   C," "
+;print <C>, B times...
+               CALL olt.dumbchat
+
+rest.logindmch:
+               LD   HL,othr.dumbchat
+;"other user" message
+               CALL rms.dumbchat
+;send the message off
+               LD   HL,(chatin.adr)
+               INC  HL
+               LD   A,(chatin.pos)
+               LD   B,A
+               CALL rmb.dumbchat
+;send user name...
+               LD   HL,oth2.dumbchat
+               CALL rms.dumbchat
+;send rest of message...
+               LD   HL,wait.dumbchat
+               CALL msg.dumbchat
+;display the "please wait"
+;message on /our/ screen
+               POP  AF
+               LD   B,A
+               LD   A,(chatin.pos)
+               ADD  A,B
+;lenght of name
+               ADD  A,lenoth1+lenoth2
+;and messages...
+               LD   B,A
+               LD   C,BACKSPACE
+               CALL olt.dumbchat
+               RET
+
+both.logindmch:
+;other person must have been waiting for us...
+;ooops!
+
+;Identify ourselves to them first...
+
+               LD   HL,oth3.dumbchat
+               CALL rms.dumbchat
+               LD   HL,(chatin.adr)
+               INC  HL
+               LD   A,(chatin.pos)
+               LD   B,A
+               CALL rmb.dumbchat
+               LD   HL,oth4.dumbchat
+               CALL rms.dumbchat
+
+               LD   HL,startdumbchat
+               CALL msg.dumbchat
+
+               LD   HL,chatedit2
+               CALL tx.message.e
+
+               XOR  A
+               LD   (chatin.pos),A
+               LD   (chatout.pos),A
+
+               LD   HL,chatflags
+;finished login!
+               SET  1,(HL)
+               POP  HL
+;remove the return address, and get
+               JP   main.loop
+;going again
+
+;Handle remote first (should be able to use the same routine for
+;both parties, but have to work on that later)
+
+chat.dumbchat:
+               LD   HL,remotename
+               LD   (remotenm.ad),HL
+               LD   HL,remotename
+               LD   (localnm.ad),HL
+               LD   HL,remote.show
+               LD   (shw.dumbchat+1),HL
+               LD   HL,local.show
+               LD   (out.dumbchat+1),HL
+               LD   HL,chatline.in-1
+               LD   (chatin.adr),HL
+               LD   HL,chatline.out-1
+               LD   (chatout.adr),HL
+               LD   A,(chatin.pos)
+               LD   B,A
+               LD   A,(chatout.pos)
+               LD   (chatin.pos),A
+               LD   A,B
+               LD   (chatout.pos),A
+
+               CALL gdfrxq
+;returns C set if data from remote...
+               CALL C,prs.dumbchat
+;parse dumbchat system...
+
+               LD   HL,chatline.out-1
+               LD   (chatin.adr),HL
+               LD   HL,chatline.in-1
+               LD   (chatout.adr),HL
+               LD   A,(chatin.pos)
+               LD   B,A
+               LD   A,(chatout.pos)
+               LD   (chatin.pos),A
+               LD   A,B
+               LD   (chatout.pos),A
+
+               CALL getkey
+;ret's NZ if key waiting...
+               JP   Z,main.loop
+
+               LD   HL,local.show
+               LD   (shw.dumbchat+1),HL
+               LD   HL,remote.show
+               LD   (out.dumbchat+1),HL
+               LD   HL,localname
+               LD   (remotenm.ad),HL
+               LD   HL,localname
+               LD   (localnm.ad),HL
+
+               CP   CHATMODE
+               CALL Z,end.dumbchat
+
+               CALL prs.dumbchat
+               JP   main.loop
+
+;Get data from keyboard...
+
+getkey:
+               LD   HL,flags
+               BIT  5,(HL)
+               RET  Z
+
+               RES  5,(HL)
+               LD   A,(lastk)
+               RET
+
+;Parse dumb chatter data
+;-----------------------
+
+prs.dumbchat:
+
+               CP   ETX
+;CTRL-C
+               JP   Z,end.dumbchat
+
+               CP   EOT
+;CTRL-D
+               JP   Z,end.dumbchat
+
+               CP   CAN
+;CTRL-X
+               JP   Z,end.dumbchat
+
+               CP   BACKSPACE
+               JP   Z,del.dumbchat
+
+               CP   DELETE
+               JP   Z,del.dumbchat
+
+               CP   cr
+               JP   Z,snd.dumbchat
+;send the current line to the chat system.
+
+               CP   32
+               RET  C
+
+;We're adding a character to the line... soooo...
+
+               LD   C,A
+;store char data in C..
+addchar.dmch:
+               LD   A,(chatin.pos)
+               CP   wrapcolumn
+;last character on line =76... so
+               JP   NC,wrp.dumbchat
+;jump if we have to wrap the line...
+
+               INC  A
+               LD   (chatin.pos),A
+               LD   HL,(chatin.adr)
+               LD   E,A
+               LD   D,0
+               ADD  HL,DE
+               LD   A,C
+               LD   (HL),A
+
+               JP   shw.dumbchat
+;send character to screen of *SYSTEM*
+;RETURNs out from shw.dumbchat routine...
+;saves a few tstates anyway..
+
+del.dumbchat:
+               LD   A,(chatin.pos)
+;is there any data in the line to delete?
+               OR   A
+               RET  Z
+;if not, just exit..
+
+               LD   HL,delchr.dmch
+               CALL msg.dumbchat
+
+               LD   A,(chatin.pos)
+               LD   HL,(chatin.adr)
+               LD   E,A
+               LD   D,0
+               ADD  HL,DE
+               LD   (HL)," "
+;clear that character..
+               DEC  A
+               LD   (chatin.pos),A
+               RET
+
+msg.dumbchat:
+               LD   A,(HL)
+               OR   A
+               RET  Z
+
+;Check for "send local name" or "send remote name" chars...
+
+               CP   &FE
+               JR   NC,snmm.dumbchat
+
+               PUSH HL
+               CALL shw.dumbchat
+rent.dumbchat:
+               POP  HL
+               INC  HL
+               JR   msg.dumbchat
+
+;Send local or remote name - FE=local, FF=remote
+snmm.dumbchat:
+               PUSH HL
+
+               LD   HL,(remotenm.ad)
+               JR   NZ,nloc.dumbchat
+
+               LD   HL,(localnm.ad)
+nloc.dumbchat:
+               LD   A,(HL)
+               OR   A
+               JR   Z,rent.dumbchat
+
+               PUSH HL
+               CALL shw.dumbchat
+               POP  HL
+               INC  HL
+               JR   nloc.dumbchat
+
+out.dumbchat:  JP   put.data2
+shw.dumbchat:  JP   put.ansi
+
+;changes depending on whether handling local
+;or remote system...
+
+wrp.dumbchat:
+               LD   A,C
+               CP   " "
+;if char which caused wrap is a space,
+;just send the complete line...
+               JR   Z,snd.dumbchat
+
+               LD   HL,(chatin.adr)
+;get typee's line & position
+               LD   DE,wrapcolumn
+;MUST be here to have triggerd
+               ADD  HL,DE
+
+               LD   A,(HL)
+;if last char typed was a space,
+               CP   " "
+;send the whole line, and start afresh
+               JR   Z,swl.dumbchat
+
+;Look for a space character loop...
+
+lfs.dumbchat:
+               LD   A,E
+;if we run out of text, send whole
+               OR   A
+;line...
+               JR   Z,swl.dumbchat
+
+               LD   A,(HL)
+               CP   " "
+;look backwards for a space to wrap from
+               JR   Z,fspc.dumbchat
+; found one!
+
+               DEC  HL
+               DEC  E
+               JR   lfs.dumbchat
+
+;Found a space character to wrap back from...
+
+fspc.dumbchat:
+               LD   A,wrapcolumn
+               SUB  E
+               INC  HL
+;advance past the space char...
+;A=no' non-space characters...
+               PUSH BC
+               PUSH HL
+               PUSH DE
+               LD   B,A
+               LD   C,BACKSPACE
+               CALL slt.dumbchat
+
+               LD   B,A
+               LD   C," "
+               CALL slt.dumbchat
+
+               POP  DE
+
+               PUSH DE
+               PUSH AF
+               LD   A,E
+               DEC  A
+;get rid of space char...
+               LD   (chatin.pos),A
+               CALL snd.dumbchat
+;send this whole line!
+               POP  AF
+               POP  DE
+               LD   (chatin.pos),A
+
+               POP  HL
+               OR   A
+               JR   Z,nml.dumbchat
+;no data left to wrap!
+
+               LD   C,A
+               LD   B,0
+;LDIR counter...
+               LD   DE,(chatin.adr)
+               INC  DE
+               LDIR
+;copy data back across the line...
+
+               LD   HL,(chatin.adr)
+               INC  HL
+               LD   B,A
+               CALL lmb.dumbchat
+;write the line to the screen
+               JR   nml.dumbchat
+;finished... now add the new
+;character to it!
+;Send whole line (next character to be typed still in C from
+;earlier)
+
+swl.dumbchat:
+               PUSH BC
+               CALL snd.dumbchat
+nml.dumbchat:
+               POP  BC
+               JP   addchar.dmch
+
+snd.dumbchat:
+               LD   HL,sendmsg.dmch
+               CALL msg.dumbchat
+;show message...
+
+               LD   HL,rewrmsg.dmch
+; (T:_ line)
+               CALL rms.dumbchat
+;send remote message...
+
+
+;Trim all the space off the end of the line (vital for
+;slow baud rates...)
+
+               LD   HL,(chatin.adr)
+               LD   A,(chatin.pos)
+               LD   E,A
+               LD   D,0
+               ADD  HL,DE
+
+;if other user sent a null line, ignore it
+
+;Find first non-space character at the end of the line...
+feoll.dumbchat:
+               LD   A,E
+;no data left in line? Oh dear...
+               LD   (chatin.pos),A
+               OR   A
+               JR   Z,nul.dumbchat
+
+               LD   A,(HL)
+               CP   " "
+               JR   NZ,feol.dumbchat
+
+               DEC  HL
+;search again...
+               DEC  E
+               JR   feoll.dumbchat
+
+feol.dumbchat:
+               LD   B,E
+               LD   HL,(chatin.adr)
+               INC  HL
+               CALL rmb.dumbchat
+;send B bytes from HL to remote...
+
+nul.dumbchat:
+               LD   A,(chatin.pos)
+               LD   B,A
+               LD   A,(chatout.pos)
+               SUB  B
+               JP   C,nul2.dumbchat
+; no need to overwrite with spaces...
+
+               JP   Z,nul2.dumbchat
+; again no need (equal lengths)
+
+
+               LD   B,A
+               LD   C,A
+;overwrite with spaces, B times...
+
+spc.dumbchat:
+               LD   A," "
+               PUSH BC
+               CALL out.dumbchat
+               POP  BC
+               DJNZ spc.dumbchat
+
+nul2.dumbchat:
+               LD   HL,chatedit2
+               CALL rms.dumbchat
+;send remote message (--> line)
+
+               LD   HL,(chatout.adr)
+               INC  HL
+               LD   A,(chatout.pos)
+               OR   A
+               JR   Z,nul3.dumbchat
+;if edit line is a null one, ignore it..
+
+               LD   B,A
+               CALL rmb.dumbchat
+;send B bytes from HL to remote...
+
+nul3.dumbchat:
+               XOR  A
+               LD   (chatin.pos),A
+               RET
+
+rmb.dumbchat:
+               LD   A,(HL)
+               PUSH BC
+               PUSH HL
+               CALL out.dumbchat
+               POP  HL
+               POP  BC
+               INC  HL
+               DJNZ rmb.dumbchat
+               RET
+
+lmb.dumbchat:
+               LD   A,(HL)
+               PUSH BC
+               PUSH HL
+               CALL shw.dumbchat
+               POP  HL
+               POP  BC
+               INC  HL
+               DJNZ lmb.dumbchat
+               RET
+
+rms.dumbchat:
+               LD   A,(HL)
+               OR   A
+               RET  Z
+
+;Check for "send local name" or "send remote name" chars...
+
+               CP   &FE
+               JR   NC,rnmm.dumbchat
+
+               PUSH HL
+               CALL out.dumbchat
+rent2.dumbchat:
+               POP  HL
+               INC  HL
+               JR   rms.dumbchat
+
+rnmm.dumbchat:
+               PUSH HL
+
+               LD   HL,(remotenm.ad)
+               JR   NZ,rloc.dumbchat
+
+               LD   HL,(localnm.ad)
+rloc.dumbchat:
+               LD   A,(HL)
+               OR   A
+               JR   Z,rent2.dumbchat
+
+               PUSH HL
+               CALL out.dumbchat
+               POP  HL
+               INC  HL
+               JR   rloc.dumbchat
+
+
+;End Dumb Chatter session...
+;---------------------------
+
+;Should it send the partially completed lines to each system bef
+;re closing?
+
+end.dumbchat:
+               LD   HL,enddumb1
+               CALL rms.dumbchat
+               POP  HL
+;get rid of return address..
+               LD   HL,enddumbchat
+               CALL tx.message.e
+               XOR  A
+               LD   (chatflags),A
+               JP   main.loop
+
+;===============================================================
+;Edit line system -- entered with HL=string
+;to start off with, C=string length (C=0 if no string), B=max
+;length of edit string, DE=screen coords. Returns with A=key
+;used to exit (CR if valid, ESCAPE if EDIT-X or ESCAPE
+;===============================================================
+
+editline:
+               LD   (editlinexy),DE
+;store coords for edit line
+               LD   A,B
+               LD   (maxeditlen),A
+               LD   A,C
+               LD   (editline.pos),A
+               LD   (editline.len),A
+
+               OR   A
+               JR   NZ,shw2.editline
+
+               CPL
+;disable selection if length=0
+               LD   (selectpos),A
+               JR   show.editline
+
+shw2.editline:
+               LD   DE,editline.buf
+               LD   B,0
+               LDIR
+show.editline:
+               LD   DE,(editlinexy)
+               LD   (coords),DE
+               LD   A,(editline.len)
+               LD   B,A
+               OR   A
+               JR   Z,null.editline
+
+               LD   HL,editline.buf
+
+               LD   DE,(edittext)
+               LD   (printcolour+1),DE
+
+               LD   A,(selectpos)
+;selection start position
+               CP   &FF
+               JR   Z,ste.editline
+;show the whole line...
+;(&FF = no selection)
+               OR   A
+               JR   Z,sl2.editline
+
+               PUSH BC
+;print SELECTPOS no' of chars...
+               PUSH AF
+;(this is text BEFORE selection point)
+               LD   B,A
+               CALL ec.chars
+;echo up to selection...
+               POP  AF
+               POP  BC
+
+sel.editline:
+               NEG
+;a=-a
+sl2.editline:
+               ADD  A,B
+;a=b-a
+               LD   B,A
+
+               PUSH BC
+               LD   DE,(seltext)
+               LD   (printcolour+1),DE
+               LD   A,(selectlen)
+;amount of selected text...
+               LD   B,A
+               PUSH AF
+               CALL ec.chars
+               POP  AF
+               POP  BC
+
+               NEG
+;a=-a  = -selectedlength (-13?)
+               ADD  A,B
+;a=b-a = charsleft-selectedlength
+               OR   A
+               JR   Z,null.editline
+
+               LD   B,A
+
+               LD   DE,(edittext)
+               LD   (printcolour+1),DE
+
+ste.editline:
+               CALL ec.chars
+null.editline:
+               LD   DE,(editbackg)
+               LD   (printcolour+1),DE
+               LD   A,(editline.len)
+               LD   B,A
+               LD   A,(maxeditlen)
+               SUB  B
+               OR   A
+               JR   Z,nmre.editline
+
+               LD   B,A
+               LD   A,(editblank)
+               LD   C,A
+               CALL prt.character
+
+nmre.editline:
+edit.editline:
+               LD   A,(editlinexy)
+               LD   L,A
+               LD   A,(editline.pos)
+               ADD  A,L
+               LD   (coords),A
+
+edit.editline2:
+               LD   A,(cursorover+1)
+               OR   A
+               JR   NZ,edit.cursover
+
+               LD   A,(idletime+1)
+               CP   5
+               JR   C,edit.nprcur
+
+               LD   A,5
+               LD   (idletime+1),A
+
+edit.cursover:
+               LD   A,(cursorclk+1)
+               CP   10
+               JR   C,edit.nprcur
+
+               CALL cursor
+               XOR  A
+               LD   (cursorover+1),A
+               LD   (cursorclk+1),A
+
+edit.nprcur:
+               CALL getkey
+               JR   Z,edit.editline2
+
+               CP   ESCAPE
+               RET  Z
+
+               CP   EXIT
+               RET  Z
+
+               CP   cr
+               RET  Z
+
+               PUSH AF
+               LD   A,(cursorflag)
+               OR   A
+               JR   NZ,edit.blankcur
+
+               CALL cursor
+
+edit.blankcur:
+               LD   A,1
+               LD   (cursorover+1),A
+               LD   A,9
+               LD   (cursorclk+1),A
+               POP  AF
+
+               CP   BACKSPACE
+               JP   Z,bs.editline
+
+               CP   DELETE
+               JP   Z,del.editline
+
+               CP   CAN
+               JP   Z,cut.selection
+
+               CP   ETX
+               JP   Z,copy.selection
+
+               CP   SYN
+               JP   Z,pste.selection
+
+               CP   32
+               JR   C,edit.editline
+
+               CP   128
+               JR   C,text.editline
+
+               CP   LEFT
+               JP   Z,left.editline
+
+               CP   RIGHT
+               JP   Z,right.editline
+
+               CP   SHLEFT
+;select to left...
+               JP   Z,shlf.editline
+
+               CP   SHRIGHT
+               JP   Z,shrt.editline
+
+               CP   HOME
+               JP   Z,home.editline
+
+               CP   END
+               JP   Z,end.editline
+
+               CP   SHHOME
+               JP   Z,shhm.editline
+
+               CP   SHEND
+               JP   Z,shen.editline
+
+               JP   edit.editline
+
+text.editline:
+               LD   E,A
+               CALL insr.selection
+               JP   show.editline
+
+pste.selection:
+               LD   A,(clipline.len)
+;no data?
+               OR   A
+               JP   Z,edit.editline
+;if so, return...
+
+               LD   A,(selectpos)
+               CP   &FF
+               JR   Z,pst2.selection
+
+               CALL del.selection
+
+pst2.selection:
+               LD   HL,clipline.buf
+               LD   A,(clipline.len)
+               LD   B,A
+pst3.loop:
+               LD   A,(maxeditlen)
+               LD   E,A
+               LD   A,(editline.len)
+               CP   E
+               JP   Z,show.editline
+;full line - can't put any
+;more data in...
+               LD   E,(HL)
+               INC  HL
+               PUSH HL
+               PUSH BC
+               CALL insr.selection
+               POP  BC
+               POP  HL
+               DJNZ pst3.loop
+               JP   show.editline
+
+;Inserts character into text line...
+
+insr.selection:
+               PUSH DE
+               LD   A,(selectpos)
+               CP   &FF
+               JR   Z,unsel.editline
+
+               CALL del.selection
+;get rid of it!
+
+unsel.editline:
+               POP  DE
+               LD   A,(editline.pos)
+               LD   C,A
+               LD   A,(editline.len)
+               LD   B,A
+               LD   A,(maxeditlen)
+               CP   B
+               JR   NZ,addc.editline
+
+               CALL bell
+;full line! ding ding!
+               RET
+
+addc.editline:
+               LD   A,B
+               CP   C
+               JR   NZ,noti.editline
+;insert char inside line
+
+               LD   HL,editline.buf
+               LD   B,0
+               ADD  HL,BC
+               LD   (HL),E
+               LD   A,(editline.pos)
+               INC  A
+               LD   (editline.pos),A
+               LD   A,(editline.len)
+               INC  A
+               LD   (editline.len),A
+               RET
+
+noti.editline:
+               LD   HL,termflags
+               BIT  2,(HL)
+               JR   Z,inst.editline
+
+;overwrite existing character...
+               LD   HL,editline.buf
+               LD   B,0
+               ADD  HL,BC
+               LD   (HL),E
+               LD   A,(editline.pos)
+               INC  A
+               LD   (editline.pos),A
+               RET
+
+inst.editline:
+               PUSH DE
+               LD   HL,editline.buf
+               LD   A,(editline.len)
+               LD   C,A
+               LD   B,0
+               ADD  HL,BC
+;HL=end of line +1
+               LD   D,H
+               LD   E,L
+               DEC  HL
+               LD   A,(editline.pos)
+               LD   B,A
+               LD   A,C
+               SUB  B
+               LD   B,0
+               LD   C,A
+               LDDR
+               POP  DE
+               INC  HL
+               LD   (HL),E
+               LD   A,(editline.len)
+               INC  A
+               LD   (editline.len),A
+               LD   A,(editline.pos)
+               INC  A
+               LD   (editline.pos),A
+               RET
+
+cut.selection:
+               LD   A,(selectpos)
+;can't cut if no selection...
+               CP   &FF
+               JP   Z,edit.editline
+
+               CALL cpy2.selection
+               CALL del.selection
+               JP   show.editline
+
+copy.selection:
+               LD   A,(selectpos)
+               CP   &FF
+               JP   Z,edit.editline
+
+               CALL cpy2.selection
+               JP   show.editline
+
+;A=selection position in current line...
+
+cpy2.selection:
+               LD   HL,editline.buf
+               LD   E,A
+               LD   D,0
+               ADD  HL,DE
+               LD   DE,clipline.buf
+               LD   A,(selectlen)
+               LD   C,A
+               LD   B,0
+               LDIR
+               LD   (clipline.len),A
+               RET
+
+right.editline:
+               LD   A,(editline.pos)
+               LD   B,A
+               LD   A,(editline.len)
+               CP   B
+               JP   Z,rtcu.editline
+
+               LD   A,B
+               INC  A
+               LD   (editline.pos),A
+
+rtcu.editline:
+               LD   A,(selectpos)
+               CP   &FF
+               JP   Z,edit.editline
+
+               LD   A,&FF
+               LD   (selectpos),A
+               CPL
+               LD   (selectlen),A
+
+               JP   show.editline
+
+;needs to be rewritten to /extend/ selections...
+
+shhm.editline:
+               LD   A,(editline.len)
+               OR   A
+               JP   Z,edit.editline
+
+               LD   A,(selectpos)
+               CP   &FF
+               JR   Z,selhm.editline
+
+               LD   A,(editline.pos)
+               LD   B,A
+               XOR  A
+               LD   (editline.pos),A
+               LD   A,(selectpos)
+               LD   B,A
+               XOR  A
+               LD   (selectpos),A
+               LD   A,(selectlen)
+               ADD  A,B
+               LD   (selectlen),A
+               JP   show.editline
+
+selhm.editline:
+               LD   A,(editline.pos)
+               LD   (selectlen),A
+               OR   A
+               LD   A,0
+               LD   (editline.pos),A
+               JP   Z,clss.editline
+
+               LD   (editline.pos),A
+               LD   (selectpos),A
+               JP   show.editline
+
+;and this one too..
+
+shen.editline:
+               LD   A,(editline.pos)
+               LD   D,A
+               LD   A,(editline.len)
+               LD   (editline.pos),A
+
+               OR   A
+               JP   Z,edit.editline
+
+;exit if line length = 0
+
+               LD   B,A
+               LD   A,D
+               CP   B
+               JP   Z,edit.editline
+
+;exit if we were already at the end of the line...
+
+               LD   A,(selectpos)
+               CP   &FF
+               JR   Z,sten.editline
+
+               LD   C,A
+               LD   A,B
+               SUB  C
+               LD   (selectlen),A
+               JP   show.editline
+
+;Start a selected area...
+
+sten.editline:
+               LD   A,D
+               LD   (selectpos),A
+               LD   A,B
+               SUB  D
+               LD   (selectlen),A
+               JP   show.editline
+
+left.editline:
+               LD   A,(editline.pos)
+               OR   A
+               JP   Z,lcls.editline
+
+               DEC  A
+               LD   (editline.pos),A
+               LD   A,(selectpos)
+               CP   &FF
+               JP   Z,edit.editline
+
+lcls.editline:
+               LD   A,&FF
+               LD   (selectpos),A
+               XOR  A
+               LD   (selectlen),A
+
+               JP   show.editline
+
+shrt.editline:
+               LD   A,(editline.pos)
+               LD   B,A
+               LD   A,(editline.len)
+               CP   B
+               JP   Z,edit.editline
+
+               LD   A,B
+               INC  A
+               LD   (editline.pos),A
+
+               LD   A,(selectpos)
+               CP   &FF
+               JR   NZ,resz.editline
+
+               LD   A,B
+               LD   (selectpos),A
+               LD   A,1
+               LD   (selectlen),A
+               JP   show.editline
+
+resz.editline:
+               LD   B,A
+               LD   A,(editline.pos)
+               DEC  A
+               CP   B
+               JR   NZ,smvr.editline
+
+               INC  A
+               LD   (selectpos),A
+               LD   A,(selectlen)
+               DEC  A
+               JR   Z,clss.editline
+
+               LD   (selectlen),A
+               JP   show.editline
+
+smvr.editline:
+               LD   A,(selectlen)
+               INC  A
+               LD   (selectlen),A
+               JP   show.editline
+
+shlf.editline:
+               LD   A,(editline.pos)
+               OR   A
+               JP   Z,edit.editline
+
+               DEC  A
+               LD   (editline.pos),A
+               LD   B,A
+
+               LD   A,(selectpos)
+               CP   &FF
+               JR   NZ,s001.editline
+
+               LD   A,B
+               LD   (selectpos),A
+               LD   A,1
+               LD   (selectlen),A
+               JP   show.editline
+
+s001.editline:
+               CP   B
+
+               JR   Z,clss.editline
+               JR   NC,smvl.editline
+;editlinepos < selectpos
+
+;selectlinepos < editline pos (ie selected area decreases, start
+;                              remains the same though)
+               LD   A,(selectlen)
+               DEC  A
+               LD   (selectlen),A
+;shouldn't ever be zero..
+
+               JP   show.editline
+
+smvl.editline:
+               LD   A,(selectpos)
+               DEC  A
+               LD   (selectpos),A
+               LD   A,(selectlen)
+               INC  A
+               LD   (selectlen),A
+
+               JP   show.editline
+
+;Clear selection totally...
+
+end.editline:
+               LD   A,(editline.len)
+               JR   hm2.editline
+home.editline:
+               XOR  A
+hm2.editline:
+               LD   (editline.pos),A
+clss.editline:
+               LD   A,&FF
+               LD   (selectpos),A
+               CPL
+               LD   (selectlen),A
+               JP   show.editline
+
+;Delete selection from edit line
+
+dels.editline:
+               CALL del.selection
+               JP   show.editline
+
+del.selection:
+               LD   A,(selectlen)
+               LD   B,A
+               LD   A,(editline.len)
+               CP   B
+               JR   Z,delw.selection
+
+               LD   A,(selectpos)
+               LD   (editline.pos),A
+
+               LD   HL,editline.buf
+               LD   DE,(selectpos)
+               LD   D,0
+               ADD  HL,DE
+               LD   D,H
+               LD   E,L
+               LD   BC,(selectlen)
+               LD   B,0
+               ADD  HL,BC
+               LD   A,(selectpos)
+               ADD  A,C
+               LD   C,A
+               LD   A,(editline.len)
+               SUB  C
+               LDIR
+               LD   C,A
+               LD   A,(selectpos)
+               ADD  A,C
+               LD   (editline.len),A
+               XOR  A
+               LD   (selectlen),A
+               CPL
+               LD   (selectpos),A
+               RET
+
+
+;Deleting whole line... easy peasy...
+
+delw.selection:
+               XOR  A
+               LD   (editline.len),A
+               LD   (selectlen),A
+               LD   (editline.pos),A
+               CPL
+               LD   (selectpos),A
+               RET
+
+;Delete character UNDER cursor position...
+
+del.editline:
+               LD   A,(selectpos)
+;delete selection if present
+               CP   &FF
+               JR   NZ,dels.editline
+
+               LD   A,(editline.pos)
+;if we're at the end of the
+               LD   E,A
+;line, there's nothing to
+               LD   A,(editline.len)
+;delete...
+               CP   E
+               JP   Z,edit.editline
+
+               DEC  A
+;this will reduce the line
+               JR   Z,delw.editline
+;to nothing...
+
+               LD   C,A
+;amount to shift...
+               LD   (editline.len),A
+               LD   B,0
+               LD   HL,editline.buf
+               LD   D,0
+               ADD  HL,DE
+               LD   D,H
+               LD   E,L
+               INC  HL
+               LDIR
+               JP   show.editline
+
+delw.editline:
+               XOR  A
+               LD   (editline.len),A
+               LD   (editline.pos),A
+               LD   (selectlen),A
+               CPL
+               LD   (selectpos),A
+               JP   show.editline
+
+;Delete character to left of cursor position...
+
+bs.editline:
+               LD   A,(selectpos)
+               CP   &FF
+               JP   NZ,dels.editline
+;delete selection...
+
+               LD   A,(editline.pos)
+               OR   A
+               JP   Z,edit.editline
+
+               LD   C,A
+               LD   B,0
+               LD   HL,editline.buf
+               ADD  HL,BC
+               LD   D,H
+               LD   E,L
+               DEC  DE
+
+               LD   A,(editline.pos)
+               LD   B,A
+               LD   A,(editline.len)
+               SUB  B
+               JR   Z,del1.editline
+
+               LD   B,0
+               LD   C,A
+               LDIR
+del1.editline:
+               LD   A,(editline.len)
+               DEC  A
+               LD   (editline.len),A
+               LD   A,(editline.pos)
+               DEC  A
+               LD   (editline.pos),A
+               JP   show.editline
+
+;Clears the editor line to its default value..
+
+;Transmit message to remote system, with local echo
+;--------------------------------------------------
+
+tx.message.e:
+               LD   A,(HL)
+               OR   A
+               RET  Z
+
+               PUSH HL
+               PUSH AF
+               CALL put.data2
+;put this message in the txq...
+               POP  AF
+               CALL put.ansi
+;put this message on the screen...
+               POP  HL
+               INC  HL
+               JR   tx.message.e
+
+;Transmit message to remote system
+;---------------------------------
+
+tx.message:
+               LD   A,(HL)
+               OR   A
+               RET  Z
+               PUSH HL
+               CALL put.data2
+               POP  HL
+               INC  HL
+               JR   tx.message
+
+;Echo message to local system
+;----------------------------
+
+ec.message:
+               LD   A,(HL)
+               OR   A
+               RET  Z
+
+               PUSH HL
+               CALL put.ansi
+               POP  HL
+               INC  HL
+               JR   ec.message
+
+;Transmit string to remote system, with local echo
+;-------------------------------------------------
+;Length in B
+
+tx.bytes.e:
+               LD   A,(HL)
+               PUSH BC
+               PUSH HL
+               PUSH AF
+               CALL put.data2
+;put this message in the txq...
+               POP  AF
+               CALL put.ansi
+;put this message on the screen...
+               POP  HL
+               POP  BC
+               INC  HL
+               DJNZ tx.bytes.e
+
+               RET
+
+;Transmit bytes to remote system
+;---------------------------------
+
+tx.bytes:
+               LD   A,(HL)
+               PUSH BC
+               PUSH HL
+               CALL put.data2
+               POP  HL
+               POP  BC
+               INC  HL
+               DJNZ tx.bytes
+
+               RET
+
+;Echo message to local system
+;----------------------------
+
+ec.bytes:
+               LD   A,(HL)
+               PUSH BC
+               PUSH HL
+               CALL put.ansi
+               POP  HL
+               POP  BC
+               INC  HL
+               DJNZ ec.bytes
+
+               RET
+
+ec.chars:
+               LD   A,(HL)
+               PUSH HL
+               CALL prtinscreen
+               POP  HL
+               INC  HL
+               DJNZ ec.chars
+
+               RET
+
+;SLT Dumbchat (prints B lots of character C)
+;-------------------------------------------
+
+slt.dumbchat:
+               PUSH AF
+slt.dchloop:
+               LD   A,C
+               PUSH BC
+               CALL shw.dumbchat
+               POP  BC
+               DJNZ slt.dchloop
+
+               POP  AF
+               RET
+
+prt.character:
+               PUSH AF
+prt.charloop:
+               LD   A,C
+               CALL prtinscreen
+               DJNZ prt.charloop
+
+               POP  AF
+               RET
+
+olt.dumbchat:
+               PUSH AF
+olt.dchloop:
+               LD   A,C
+               PUSH BC
+               CALL out.dumbchat
+               POP  BC
+               DJNZ olt.dchloop
+
+               POP  AF
+               RET
+
+
+;Flush all queues...
+;-------------------
+
+flush.all:
+               DI
+               LD   HL,tx.q
+               LD   (tx.q.head),HL
+;initialise tx and rx queues.
+               LD   (tx.q.tail),HL
+               LD   HL,rx.q
+               LD   (rx.q.head),HL
+               LD   (rx.q.tail),HL
+               LD   A,cint.init
+;initialise interrupt mask
+               LD   (cint.mask),A
+               LD   BC,(im.port)
+               OUT  (C),A
+               EI
+               RET
+
+;Initialise ANSI driver
+;----------------------
+
+init.ansi:
+               XOR  A
+               LD   (siomode),A
+               LD   (style),A
+               LD   (ansi.flags),A
+               LD   A,def.colour
+               LD   (pcolour),A
+               LD   (tcolour),A
+               LD   DE,(defaulttty)
+               LD   (printcolour+1),DE
+               LD   HL,0
+               LD   (coords),HL
+               LD   (coord.store),HL
+               RET
+
+;Initialise COMMS device
+;-----------------------
+
+init.comms:
+               LD   BC,(cr.port)
+               LD   A,2+8+16
+;disable rx & tx
+;set MR pointer to MR1
+               OUT  (C),A
+               LD   A,32
+               OUT  (C),A
+               LD   A,48
+               OUT  (C),A
+
+               LD   B,&00
+               LD   A,(mr1.init)
+               OUT  (C),A
+               LD   A,(mr2.init)
+               OUT  (C),A
+               INC  B
+               LD   A,(csr.init)
+               OUT  (C),A
+               LD   B,&04
+               LD   A,56
+;set Power down/timer mode
+               OUT  (C),A
+               INC  B
+               LD   A,cint.init
+;initialise interrupt status
+               OUT  (C),A
+               XOR  A
+               INC  B
+               OUT  (C),A
+               INC  B
+               OUT  (C),A
+               LD   B,&02
+               LD   A,64
+               OUT  (C),A
+               LD   A,80
+               OUT  (C),A
+               LD   A,160
+               OUT  (C),A
+
+               LD   A,5
+               OUT  (C),A
+               RET
+
+put.ansi:
+               PUSH AF
+               LD   A,(cursorflag)
+               OR   A
+               CALL Z,cursor
+               POP  AF
+               CALL ansi.print
+               RET
+
+cursor_off:
+               LD   A,(cursorflag)
+               OR   A
+               JP   Z,cursor
+               RET
+
+;Print the ansi text...
+;----------------------
+
+ansi.print:
+               LD   C,A
+;store in case
+               LD   A,(ansi.flags)
+               CP   1
+               JP   Z,ansi.e1
+               JP   NC,ansi.e2
+
+               LD   A,C
+               CP   ansi.esc1
+;ANSI escape code? (27)
+               JP   Z,set.ansif1
+
+;put not.ansi here for speed
+
+not.ansi:
+               CP   tab
+               JP   Z,taba
+               CP   lf
+               JP   Z,linefeed
+               CP   ff
+               JP   Z,jjcode
+               CP   cr
+               JP   Z,cret
+               CP   bs
+               JP   Z,backspace
+               CP   BEL
+               JP   Z,bell
+
+               CP   SI
+               JP   Z,shiftin
+
+               CP   SO
+               JP   Z,shiftout
+
+               CP   32
+               RET  C
+
+               PUSH AF
+               LD   A,(siomode)
+               LD   B,A
+
+               LD   A,(coords)
+               CP   maxx+1
+               JR   C,notatend
+
+               LD   A,maxx
+
+               LD   HL,termflags
+;wrap mode check...
+               BIT  7,(HL)
+               JR   Z,notinrtmg
+
+               CALL linefeed
+               XOR  A
+               LD   (coords),A
+               POP  AF
+
+               CALL print.charm
+               LD   A,1
+               LD   (coords),A
+               RET
+notinrtmg:
+               LD   (coords),A
+               POP  AF
+               BIT  0,B
+;shift in VT100 chars...
+               JR   Z,ok.print
+
+               CP   "_"
+               JR   C,ok.print
+
+               CP   "~"+1
+               JR   NC,ok.print
+
+               SUB  "_"
+
+ok.print:
+               CALL print.charm
+               LD   A,maxx+1
+               LD   (coords),A
+               RET
+
+notatend:      POP  AF
+               BIT  0,B
+               JR   Z,ok2.print
+
+               CP   "_"
+               JR   C,ok2.print
+
+               CP   "~"
+               JR   NC,ok2.print
+
+               SUB  "_"
+
+ok2.print:
+               CALL print.charm
+
+               LD   A,(coords)
+               INC  A
+               CP   maxx+1
+               JR   C,notoverx
+
+               LD   A,maxx+1
+
+notoverx:
+               LD   (coords),A
+
+               RET
+
+shiftout:
+               LD   A,1
+               LD   (siomode),A
+               RET
+
+shiftin:
+               XOR  A
+               LD   (siomode),A
+               RET
+
+;---------------------------------------------------------------
+
+linefeed:
+               LD   A,(coords+1)
+               INC  A
+               CP   maxyline+1
+               JR   NZ,notovery
+
+               LD   A,maxyline
+               LD   (coords+1),A
+               CALL scroll.screen
+
+notovery:
+               LD   (coords+1),A
+               LD   A,(crlf_flag)
+               AND  1
+               JR   NZ,cret
+
+               RET
+
+cret:
+               XOR  A
+               LD   (coords),A
+               LD   A,(crlf_flag)
+               AND  2
+               JR   NZ,linefeed
+
+               RET
+
+taba:
+               LD   A,(coords)
+               ADD  A,8
+               AND  %11111000
+               CP   maxx
+               JR   C,okayx
+
+               LD   A,maxx
+okayx:
+               LD   (coords),A
+;set X coord to tab position.
+
+
+               RET
+
+backspace:
+               LD   A,(coords)
+               OR   A
+               RET  Z
+
+               DEC  A
+               LD   (coords),A
+
+               RET
+
+ansi.e1:
+               LD   A,C
+               CP   ansi.esc2
+               JR   Z,set.ansif2
+
+               XOR  A
+               LD   (ansi.flags),A
+               LD   A,C
+               JP   not.ansi
+
+set.ansif1:
+               LD   A,1
+               LD   (ansi.flags),A
+               RET
+
+set.ansif2:
+               LD   A,2
+               LD   (ansi.flags),A
+               LD   HL,ansi.stacks
+               LD   (ansi.stack),HL
+               XOR  A
+               LD   (ansi.stackl),A
+               RET
+
+ansi.e2:
+               LD   A,C
+
+               CP   "9"+1
+               JR   NC,not.a.digit
+
+               CP   "0"
+               JR   C,not.a.digit2
+
+;Is a digit or a semicolon, so put it on the stack
+
+put.on.stack:
+               LD   HL,(ansi.stack)
+               LD   (HL),A
+               INC  L
+               LD   (ansi.stack),HL
+               LD   A,(ansi.stackl)
+               INC  A
+               LD   (ansi.stackl),A
+               RET
+
+not.a.digit:
+               CP   "?"
+               RET  Z
+
+               CP   ";"
+               JR   Z,put.on.stack
+
+not.a.digit2:
+               SUB  "A"
+               JP   C,invalid.ansi
+
+               CP   "z"-"B"
+               JP   NC,invalid.ansi
+
+               LD   HL,ansi.stacks
+               LD   (ansi.stack),HL
+               LD   L,A
+               LD   H,0
+               ADD  HL,HL
+               LD   DE,ansi.table
+               ADD  HL,DE
+               LD   E,(HL)
+               INC  HL
+               LD   D,(HL)
+               EX   DE,HL
+               JP   (HL)
+
+invalid.ansi:
+               XOR  A
+               LD   (ansi.flags),A
+               LD   A,C
+               JP   not.ansi
+
+inval:
+
+clear.down:
+               XOR  A
+               LD   (ansi.flags),A
+               RET
+
+;Move cursor up N lines
+;----------------------
+
+Acode:
+               LD   A,(ansi.stackl)
+               OR   A
+               JP   Z,Adefault
+
+               CALL decode.dec
+               JP   C,inval
+
+decA:
+               LD   A,(coords+1)
+               SUB  C
+               JP   NC,noAcode
+
+               XOR  A
+noAcode:
+               LD   (coords+1),A
+               JP   clear.down
+
+Adefault:
+               LD   C,1
+               JP   decA
+
+;Move cursor down N lines
+;------------------------
+
+Bcode:
+               LD   A,(ansi.stackl)
+               OR   A
+               JP   Z,defaultB
+
+               CALL decode.dec
+               JP   C,inval
+
+bcoded:
+               LD   A,(coords+1)
+               ADD  A,C
+               JR   C,myreset
+
+               CP   maxyline+1
+               JR   C,noBcode
+
+myreset:
+               LD   A,maxyline
+
+noBcode:
+               LD   (coords+1),A
+               JP   clear.down
+
+defaultB:
+               LD   C,1
+               JR   bcoded
+
+
+
+;Move cursor right N chars
+;-------------------------
+
+Ccode:
+               LD   A,(ansi.stackl)
+               OR   A
+               JP   Z,defaultC
+
+               CALL decode.dec
+               JP   C,inval
+
+decoc:
+               LD   A,(coords)
+               ADD  A,C
+               JR   C,mxreset
+
+               CP   maxx+1
+               JR   C,noCcode
+
+mxreset:
+               LD   A,maxx
+noCcode:
+               LD   (coords),A
+               JP   clear.down
+
+defaultC:
+               LD   C,1
+               JP   decoc
+
+Dcode:
+               LD   A,(ansi.stackl)
+               OR   A
+               JP   Z,default.D
+
+               CALL decode.dec
+               JP   C,inval
+
+decod:
+               LD   A,(coords)
+               SUB  C
+               JR   NC,noDcode
+
+               XOR  A
+
+noDcode:
+               LD   (coords),A
+               JP   clear.down
+
+default.D:
+               LD   C,1
+               JR   decod
+
+ncode:
+               LD   A,(ansi.stackl)
+               OR   A
+               JP   Z,clear.down
+
+               CALL decode.dec
+               JP   C,inval
+
+               LD   A,C
+               CP   6
+               JP   NZ,clear.down
+
+               CALL put.esc
+               LD   A,(coords+1)
+               INC  A
+               CALL put.number
+               LD   A,";"
+               CALL put.data2
+               LD   A,(coords)
+               INC  A
+               CALL put.number
+               LD   A,"R"
+               CALL put.data2
+               JP   clear.down
+
+put.number:
+               CP   10
+               JR   C,less.t.10
+
+               LD   E,0
+tenloop:
+               SUB  10
+               JR   C,finished10
+
+               INC  E
+               JR   tenloop
+
+less.t.10:
+               LD   D,A
+               JR   nexter
+finished10:
+               ADD  A,10
+               LD   D,A
+               LD   A,E
+               ADD  A,"0"
+               CALL put.data2
+nexter:
+               LD   A,D
+               ADD  A,"0"
+               CALL put.data2
+               RET
+
+fcode:
+Hcode:
+               LD   A,(ansi.stackl)
+               OR   A
+               JR   Z,home.cursor
+
+               CALL decode.dec
+               JP   C,home.cursor
+
+               LD   A,C
+               DEC  A
+               CP   maxyline+1
+               JP   NC,inval
+
+               LD   (coords+1),A
+
+               CALL decode.dec
+               JP   C,inval
+
+               LD   A,C
+;is x coord too high?
+               DEC  A
+               CP   maxx+1
+               JP   NC,inval
+
+               LD   (coords),A
+
+               JP   clear.down
+
+home.cursor:
+               XOR  A
+               LD   (coords+1),A
+               LD   (coords),A
+               JP   clear.down
+
+Jcode:
+               CALL decode.dec
+               JP   C,inval
+
+               LD   A,C
+               CP   2
+               JP   NZ,inval
+
+jjcode:
+               LD   A,255
+               LD   (cursorflag),A
+               CALL clear.screenm
+               JP   home.cursor
+
+Kcode:
+               LD   HL,(coords)
+               LD   (coord2),HL
+               LD   A,80
+               SUB  L
+               LD   B,A
+plooper:
+               PUSH BC
+               LD   A," "
+               CALL not.ansi
+               POP  BC
+               DJNZ plooper
+
+               LD   HL,(coord2)
+               LD   (coords),HL
+               JP   clear.down
+
+scode:
+               LD   HL,(coords)
+               LD   (coord.store),HL
+               JP   clear.down
+
+ucode:         LD   HL,(coord.store)
+               LD   (coords),HL
+               JP   clear.down
+
+mcode_1:
+               LD   A,(ansi.stackl)
+               OR   A
+               JP   Z,set.style
+mcode:
+               LD   A,(ansi.stackl)
+               OR   A
+               JP   Z,clear.down
+
+               CALL decode.dec
+               JP   C,clear.down
+
+               LD   A,C
+
+               CP   9
+               JP   C,set.style
+
+               CP   30
+               JR   C,mcode
+
+               CP   38
+               JR   C,set.ink
+
+               CP   39
+               JR   Z,set.default
+
+               CP   40
+               JR   C,mcode
+
+               CP   48
+               JR   C,set.paper
+               JR   mcode
+
+set.style:
+               OR   A
+               JR   NZ,not.cstyle
+
+               LD   (style),A
+               JR   set.default
+
+not.cstyle:
+               LD   B,A
+               XOR  A
+               SCF
+sf:
+;rotate style bit into place
+               ADC  A,A
+               DJNZ sf
+
+               LD   B,A
+               LD   A,(style)
+               OR   B
+               LD   (style),A
+               JR   mcode
+
+
+set.ink:
+               SUB  30
+               LD   L,A
+               LD   H,0
+               LD   DE,colour.swap
+               ADD  HL,DE
+               LD   B,(HL)
+
+               LD   A,(pcolour)
+               AND  %11111000
+               OR   B
+set.cols:
+               LD   (pcolour),A
+               LD   (tcolour),A
+               CALL set.colour
+               JR   mcode
+
+set.default:
+               LD   A,def.colour
+               JR   set.cols
+
+set.paper:
+               SUB  40
+               LD   L,A
+               LD   H,0
+               LD   DE,colour.swap
+               ADD  HL,DE
+               LD   A,(HL)
+
+               ADD  A,A
+               ADD  A,A
+               ADD  A,A
+               LD   B,A
+               LD   A,(pcolour)
+               AND  %11000111
+               OR   B
+               JR   set.cols
+
+set.colour:
+               LD   A,(tcolour)
+               LD   L,A
+               LD   H,0
+               ADD  HL,HL
+               LD   DE,colour.table
+               ADD  HL,DE
+               LD   E,(HL)
+               INC  HL
+               LD   D,(HL)
+setcolour2:
+               LD   A,E
+               LD   (inkmask),A
+               LD   A,D
+               LD   (papermask),A
+               LD   A,D
+               XOR  E
+               LD   (printcolour+2),A
+               LD   A,D
+               LD   (printcolour+1),A
+               RET
+
+decode.dec:
+               PUSH HL
+               XOR  A
+               LD   C,A
+               LD   A,(ansi.stackl)
+               LD   B,A
+               LD   HL,(ansi.stack)
+
+               OR   A
+               JR   Z,decode.err
+;nothing in stack when number
+;expected...
+               LD   A,(HL)
+               CP   ";"
+               JR   Z,decode.err
+;find a separator first -
+;bomb out
+numeric.loop:
+               LD   A,C
+               ADD  A,A
+               LD   C,A
+               ADD  A,A
+               ADD  A,A
+               ADD  A,C
+;c*10
+               ADD  A,(HL)
+;+(hl)
+               SUB  "0"
+;bring into range 0-10
+               LD   C,A
+               DEC  B
+               JR   Z,exit.dec
+
+               INC  HL
+               LD   A,";"
+               CP   (HL)
+               JR   NZ,numeric.loop
+
+               DEC  B
+               INC  HL
+exit.dec:
+               LD   (ansi.stack),HL
+               LD   A,B
+               LD   (ansi.stackl),A
+               AND  A
+               POP  HL
+               RET
+
+decode.err:
+               SCF
+               POP  HL
+               RET
+
+scroll.screen:
+               LD   HL,(mirror.ltable)
+               PUSH HL
+               LD   DE,mirror.ltable
+               LD   HL,mirror.ltable+2
+               LD   BC,23*2
+               LDIR
+               POP  HL
+               PUSH HL
+               PUSH DE
+               LD   DE,(defaulttty)
+               LD   B,80
+clearbot.l:
+               LD   (HL)," "
+               INC  HL
+               LD   (HL),E
+               INC  HL
+               LD   (HL),D
+               INC  HL
+               DJNZ clearbot.l
+               POP  HL
+               POP  DE
+               LD   (HL),E
+               INC  HL
+               LD   (HL),D
+
+               LD   HL,clrbotline
+               PUSH HL
+
+               LD   HL,&8400
+               LD   DE,&8000
+               LD   BC,24576-1024
+               JR   ldiloop
+
+clrbotline:
+               LD   HL,&DC00
+               LD   DE,&DC01
+               LD   BC,1024
+               LD   (HL),L
+
+ldiloop:
+               INC  "1024ldis.s"
+               JP   PE,ldiloop
+               RET
+
+
+cursor:
+               LD   A,(cursorflag)
+               CPL
+               LD   (cursorflag),A
+
+               LD   A,(coords)
+               LD   L,A
+               ADD  A,A
+               ADD  A,L
+               SRL  A
+               LD   L,A
+               JR   C,odd.cursor
+
+               LD   A,(coords+1)
+               ADD  A,A
+               ADD  A,A
+               ADD  A,3
+               SET  7,L
+               LD   H,A
+               SET  7,H
+               LD   A,(HL)
+               CPL
+               LD   (HL),A
+               INC  L
+               LD   A,(HL)
+               XOR  &F0
+               LD   (HL),A
+               RET
+
+odd.cursor:
+               LD   A,(coords+1)
+               ADD  A,A
+               ADD  A,A
+               ADD  A,3
+               LD   H,A
+               SET  7,L
+               SET  7,H
+               LD   A,(HL)
+               XOR  &0F
+               LD   (HL),A
+               INC  L
+               LD   A,(HL)
+               CPL
+               LD   (HL),A
+               RET
+
+;-------------------------------------------------
+
+key.read:
+               CALL kinter
+               LD   HL,(kbqp)
+               LD   A,H
+               CP   L
+               RET  Z
+
+               LD   HL,flags
+               BIT  5,(HL)
+               RET  NZ
+
+               SET  5,(HL)
+               LD   L,A
+               LD   H,0
+               INC  A
+               AND  &07
+               LD   (kbqp+1),A
+               LD   DE,kbqb
+               ADD  HL,DE
+               LD   A,(HL)
+               LD   (lastk),A
+               RET
+
+kinter:
+               CALL keyscan
+
+               LD   A,0
+               JR   NZ,ldlh
+
+               LD   HL,nlasth
+               LD   A,E
+               CP   (HL)
+               JR   Z,kbcr
+
+               CP   65
+               JR   NZ,kbcr
+               INC  HL
+               CP   (HL)
+kbcr:
+               PUSH AF
+               CALL kyvl
+               LD   C,A
+               LD   HL,repct
+               POP  AF
+               JR   NZ,kbdi
+
+               DEC  (HL)
+               RET  NZ
+
+               PUSH HL
+               LD   DE,kbuff+8
+               LD   HL,(lkpb)
+               LD   A,H
+               ADD  A,E
+               LD   E,A
+               LD   A,(DE)
+kbxl:
+               RLCA
+               DEC  L
+               JR   NZ,kbxl
+               POP  HL
+               RET  C
+               INC  (HL)
+               LD   A,(flags)
+               AND  &20
+               RET  NZ
+               LD   A,(repper)
+               JR   kbrk
+kbdi:
+               LD   A,(repdel)
+kbrk:          LD   (HL),A
+               LD   HL,(kbqp)
+               LD   A,L
+               INC  A
+               AND  &07
+               CP   H
+               RET  Z
+               LD   (kbqp),A
+               LD   H,0
+               LD   DE,kbqb
+               ADD  HL,DE
+               LD   (HL),C
+
+               LD   A,(lastkv)
+ldlh:
+               LD   HL,nlasth
+               LD   C,(HL)
+               LD   (HL),A
+               INC  HL
+               LD   B,(HL)
+               LD   (HL),C
+               INC  HL
+               LD   (HL),B
+               RET
+
+kyvl:
+               LD   HL,kbtab
+               LD   A,D
+               LD   D,0
+               ADD  HL,DE
+               AND  A
+               JR   Z,kint4
+
+               LD   E,72
+kyvlp:
+               ADD  HL,DE
+               DEC  A
+               JR   NZ,kyvlp
+
+kint4:
+               LD   A,(flags2)
+               AND  &08
+               LD   A,(HL)
+               RET  Z
+               CALL alpha
+               RET  NC
+               AND  &0D
+               RET
+
+keyscan:
+               LD   HL,kbuff
+               PUSH HL
+               LD   BC,&FE00+keyport
+               LD   D,&E0
+kbsl:
+               IN   E,(C)
+               LD   A,B
+               IN   A,(stat)
+               XOR  E
+               AND  D
+               XOR  E
+               INC  B
+               JR   Z,kbel
+
+               LD   (HL),A
+               DEC  B
+               INC  HL
+               RLC  B
+               JR   C,kbsl
+
+               LD   B,&FF
+               JR   kbsl
+
+kbel:
+               OR   &E1
+               LD   (HL),A
+               POP  HL
+               LD   D,H
+               LD   E,L
+               SET  0,(HL)
+               INC  HL
+               INC  HL
+               INC  HL
+               INC  HL
+               INC  HL
+               INC  HL
+               SET  7,(HL)
+               INC  HL
+               SET  1,(HL)
+               INC  HL
+               INC  HL
+               LD   B,9
+kbcl:
+               LD   A,(DE)
+               LD   C,(HL)
+               LD   (HL),A
+               XOR  C
+               CPL
+               OR   (HL)
+               LD   (DE),A
+               INC  HL
+               INC  DE
+               DJNZ kbcl
+
+               LD   B,9
+kbdl:
+               DEC  DE
+               LD   A,(DE)
+               INC  A
+               JR   NZ,kbyk
+
+               DJNZ kbdl
+
+               LD   B,9
+               LD   DE,(lastkv)
+kbakl:
+               DEC  HL
+               LD   A,(HL)
+               INC  A
+               JR   NZ,kbsh
+               DJNZ kbakl
+               INC  B
+               RET
+kbyk:
+               DEC  A
+               LD   C,9
+kbbl:
+               DEC  C
+               RRA
+               JR   C,kbbl
+               LD   (lkpb),BC
+               LD   A,C
+               ADD  A,A
+               ADD  A,A
+               ADD  A,A
+               ADD  A,C
+               SUB  B
+               LD   E,A
+kbsh:
+               LD   D,0
+               LD   BC,&FEFE
+               IN   A,(C)
+               RRA
+               RL   D
+               INC  B
+               IN   A,(C)
+               RRA
+               RL   D
+               LD   B,&7F
+               IN   A,(C)
+               RRA
+               RRA
+               RL   D
+               LD   BC,&BFF9
+               IN   A,(C)
+               RLA
+               RL   D
+
+               LD   A,D
+               CPL
+               AND  &0F
+               LD   D,A
+               XOR  A
+kbld:
+               LD   (lastkv),DE
+               RET
+
+alpha:
+               CP   "A"
+               CCF
+               RET  NC
+
+               CP   "z"+1
+               RET  NC
+
+               CP   "Z"+1
+               RET  C
+
+               CP   "a"
+               CCF
+               RET
+
+
+bell:
+               LD   HL,termflags
+               BIT  1,(HL)
+               JR   Z,bellonly
+
+               LD   A,2
+               LD   (bell.sound),A
+
+bellonly:
+               BIT  0,(HL)
+               RET  NZ
+;if sound off, exit!
+
+               LD   BC,511
+               LD   A,28
+;reset sound chip
+               OUT  (C),A
+               DEC  B
+               OUT  (C),B
+               INC  B
+
+               LD   A,20
+;set to channel 2 on freq. only
+               OUT  (C),A
+               DEC  B
+               LD   A,4
+               OUT  (C),A
+               INC  B
+
+               LD   A,21
+;set all noise off
+               OUT  (C),A
+               DEC  B
+               OUT  (C),B
+               INC  B
+
+               LD   A,2
+;set channel 2 to max volume
+               OUT  (C),A
+               DEC  B
+               OUT  (C),C
+               INC  B
+
+               LD   E,9
+               OUT  (C),E
+               DEC  B
+               OUT  (C),B
+               INC  B
+               INC  E
+               OUT  (C),E
+               DEC  B
+               LD   A,128
+               OUT  (C),A
+               INC  B
+               LD   E,&10
+               OUT  (C),E
+               LD   A,%00110000
+               DEC  B
+               OUT  (C),A
+               INC  B
+               INC  E
+               LD   A,%00000101
+               OUT  (C),E
+               DEC  B
+               OUT  (C),A
+               INC  B
+               LD   A,24
+               OUT  (C),A
+               DEC  B
+               LD   A,128
+               OUT  (C),A
+               INC  B
+
+               LD   A,28
+               OUT  (C),A
+               DEC  B
+               LD   A,1
+               OUT  (C),A
+               INC  B
+
+               LD   A,24
+               OUT  (C),A
+               DEC  B
+               LD   A,128+4
+               OUT  (C),A
+               RET
+
+;Entered with IX pointing to compressed font data in form:
+;    76543210
+;    @@@@@@..
+;IY points to font table to use...
+;(even first, then odd later)
+
+makefont:
+               LD   DE,font.data1
+               LD   B,0
+
+makef1.loop:
+               PUSH BC
+               LD   B,0
+makef2.loop:
+               LD   A,B
+               LD   (convdat+2),A
+
+convdat:       LD   A,(IY+0)
+               SRL  A
+               LD   (getdat+2),A
+
+getdat:        LD   A,(IX+0)
+               JR   NC,convlfnyb
+
+               AND  &0F
+               JR   rejoin.nyb
+
+convlfnyb:
+               AND  &F0
+               RRCA
+               RRCA
+               RRCA
+               RRCA
+rejoin.nyb:
+               LD   C,A
+               LD   A,B
+               LD   B,0
+               LD   HL,fonttable
+               ADD  HL,BC
+               LD   B,A
+               LD   A,(HL)
+               LD   (DE),A
+               INC  DE
+               INC  B
+               LD   A,B
+               CP   16
+               JR   NZ,makef2.loop
+
+               LD   BC,8
+               ADD  IX,BC
+;point to next character...
+
+               POP  BC
+               DJNZ makef1.loop
+
+               LD   BC,16
+;point to second conversion table
+               ADD  IY,BC
+               LD   IX,font6x8
+
+makef3.loop:
+               PUSH BC
+               LD   B,0
+makef4.loop:
+               LD   A,B
+               LD   (convdat2+2),A
+
+convdat2:      LD   A,(IY+0)
+               SRL  A
+               LD   (getdat2+2),A
+
+getdat2:       LD   A,(IX+0)
+               JR   NC,convlfnyb2
+
+               RRCA
+               RRCA
+               AND  &0F
+
+               JR   rejoin.nyb2
+
+convlfnyb2:
+               RLCA
+               RLCA
+               AND  &0F
+rejoin.nyb2:
+               LD   C,A
+               LD   A,B
+               LD   B,0
+               LD   HL,fonttable
+               ADD  HL,BC
+               LD   B,A
+               LD   A,(HL)
+               LD   (DE),A
+               INC  DE
+               INC  B
+               LD   A,B
+               CP   16
+               JR   NZ,makef4.loop
+
+               LD   BC,8
+               ADD  IX,BC
+;point to next character...
+
+               POP  BC
+               DJNZ makef3.loop
+
+               RET
+
+;---------------------------------------------------------------
+
+;Start of character printing routines
+
+;Entry point for character print routine...
+;(copies to mirror screen also...)
+
+print.charm:
+               EX   AF,AF'
+               LD   A,(coords+1)
+               ADD  A,A
+               LD   L,A
+               LD   H,0
+               LD   DE,mirror.ltable
+               ADD  HL,DE
+               LD   E,(HL)
+               INC  L
+               LD   D,(HL)
+               LD   A,(coords)
+               LD   L,A
+               ADD  A,A
+               ADD  A,L
+               LD   L,A
+               LD   H,0
+               ADD  HL,DE
+               EX   AF,AF'
+               LD   (HL),A
+               INC  HL
+               LD   DE,(printcolour+1)
+               LD   (HL),E
+               INC  HL
+               LD   (HL),D
+print.char:
+printcolour:   LD   BC,&FF00
+               LD   L,A
+               LD   H,0
+               ADD  HL,HL
+               ADD  HL,HL
+               ADD  HL,HL
+               ADD  HL,HL
+;*16
+               LD   DE,font.data1
+;point to even character font data
+               ADD  HL,DE
+
+coordstore:    LD   DE,&0000
+coords:        EQU  coordstore+1
+xcoord:        EQU  coords
+ycoord:        EQU  coords+1
+               LD   A,D
+               ADD  A,A
+               ADD  A,A
+               LD   D,A
+               LD   A,E
+               CP   80
+               JR   C,offedge
+
+               LD   A,79
+offedge:
+               ADD  A,A
+               ADD  A,E
+               SRL  A
+               SET  7,D
+
+               JP   C,print.odd2
+
+               LD   E,A
+               JP   print.even2
+
+print.even2:
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 0
+               INC  L
+               INC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 2
+               INC  L
+               INC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 4
+               INC  L
+               INC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 6
+               INC  L
+               SET  7,E
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 7
+               INC  L
+               DEC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 5
+               INC  L
+               DEC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 3
+               INC  L
+               DEC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 1
+               INC  L
+               INC  E
+;move to next column...
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               LD   (pass.even+1),DE
+
+               EXX
+pass.even:     LD   HL,&0000
+
+               LD   D,&F0
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 1
+               INC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 3
+               INC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 5
+               INC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 7
+               RES  7,L
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 6
+               DEC  H
+               EXX
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 4
+               DEC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 2
+               DEC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 0
+               RET
+;finished!
+
+
+;Print odd data
+
+print.odd2:
+               INC  A
+               LD   E,A
+               SET  4,H
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 0
+               INC  L
+               INC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 2
+               INC  L
+               INC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 4
+               INC  L
+               INC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 6
+               INC  L
+               SET  7,E
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 7
+               INC  L
+               DEC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 5
+               INC  L
+               DEC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 3
+               INC  L
+               DEC  D
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               LD   (DE),A
+;line 1
+               INC  L
+               DEC  E
+;move left to next column...
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               LD   (pass.odd+1),DE
+
+               EXX
+pass.odd:      LD   HL,&0000
+
+               LD   D,&0F
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 1
+               INC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 3
+               INC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 5
+               INC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 7
+               RES  7,L
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 6
+               DEC  H
+               EXX
+
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 4
+               DEC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               INC  L
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 2
+               DEC  H
+               EXX
+               LD   A,B
+               AND  (HL)
+               XOR  C
+               EXX
+               XOR  (HL)
+               AND  D
+               XOR  (HL)
+               LD   (HL),A
+;line 0
+               RET
+;finished!
+
+;==============================================================
+
+;Data store
+;----------
+
+ansi.flags:    DEFB 0
+siomode:       DEFB 0
+;shift in/out mode
+crlf_flag:     DEFB 1
+
+chatflags:     DEFB %00000000
+
+;Bit 0 - chat mode on if set, off if reset
+;Bit 1 - for dumb chat mode, login if 0, chatting if 1
+;Bit 2 - Disallow remote chat requests if set
+;Bit 3 - Allow TERMITE user to select which mode (from menu) if set
+;Bit 4 -\_ if 00 - Dumb TTY server mode, 01 - ANSI server mode,
+;Bit 5 -/     10 - EMSI client mode, 11 - ?
+;Bit 6 - Local user has logged in
+;Bit 7 - Remote user has logged in
+
+termflags:     DEFB %00000000
+;Bit 7 - Wrap mode on if set, off if reset
+;Bit 6 - Scrollback buffer on/off
+;Bit 5 - Local echo if set, off if reset
+;Bit 4 - Capture-to-file is on if set
+;Bit 3 - Capture-keystrokes-to-file if set
+;Bit 2 - Overwrite mode if set, insert mode if reset
+;Bit 1 - Flash on sound if set, off if reset
+;Bit 0 - Sound off if set, on if reset
+
+termflags2:	  DEFB %00000000
+;currently undefined
+
+termflags3:	  DEFB %00000000
+;currently undefined
+
+systemflags:   DEFB %00000000
+
+;Bit 7 - CAPSLOCK on if set, off if reset.
+;Bit 6 - Autologin on if set, off if reset.
+;Bit 5 - Baud rate locked if reset, Autobaud on if set.
+;Bit 4 - Destructive BS if set, nondestructive if reset.
+;Bit 3 - Online status - online if set, offline if reset.
+;Bit 2 - G1 character set if set, G0 character set if reset.
+;Bit 1 - Cursor is in right hand margin if set (used by backspace & line
+;        wrapping routines...)
+;Bit 0 - Key waiting in queue (reset to indicate that new key is
+;                              required).
+
+pcolour:       DEFB 0
+tcolour:       DEFB 0
+inkmask:       DEFB %11111111
+papermask:     DEFB 0
+cursor.type:   DEFB 1
+style:         DEFB 0
+coord.store:   DEFW 0
+coord2:        DEFW 0
+ansi.stack:    DEFW 0
+ansi.stackl:   DEFB 0
+
+colour0:       DEFB 0
+colour1:       DEFB 17
+colour2:       DEFB 68+34
+colour3:       DEFB 127
+
+tempxcoord:    DEFB 0
+winxystore:    DEFW 0
+terminkstore:  DEFW 0
+winxy:         DEFW 0
+winwh:         DEFW 0
+topwindow:     DEFB 0
+bottomwindow:  DEFB 0
+leftwindow:    DEFB 0
+rightwindow:   DEFB 0
+selectpos:     DEFB 2
+selectlen:     DEFB 5
+
+colourtoreplc:
+boxcolour:     DEFB c1,c0
+titlecolour:   DEFB c3,c1
+inboxcolour:   DEFB c3,c0
+boldinbox:     DEFB c2,c0
+statusnorm:    DEFB c3,c1
+statusbold:    DEFB c2,c1
+edittext:      DEFB c2,c0
+editbackg:     DEFB c1,c0
+seltext:       DEFB c0,c3
+defaulttty:    DEFB c3,c0
+infoboxcol:    DEFB c2,c1
+infoboxtext:   DEFB c3,c1
+
+colourtobexor:
+               DEFB c1,c0 ;boxcolour
+               DEFB c3,c1 ;titlecolour
+               DEFB c3,c0 ;inboxcolour
+               DEFB c2,c0 ;boldinbox
+               DEFB c3,c1 ;statusnorm
+               DEFB c2,c1 ;statusbold
+               DEFB c2,c0 ;edittext
+               DEFB c1,c0 ;editbackg
+               DEFB c0,c3 ;seltext
+               DEFB c3,c0 ;defaulttty
+               DEFB c2,c1 ;infobox colour
+               DEFB c3,c1 ;infobox text
+colournum:     EQU  $-colourtobexor/2
+
+editblank:     DEFB &B1
+;character for "blank" areas in edit
+;lines...
+
+;Current comms port values
+
+mr.port:       DEFW &00EC
+sr.port:       DEFW &01EC
+cr.port:       DEFW &02EC
+thr.port:      DEFW &03EC
+acr.port:      DEFW &04EC
+im.port:       DEFW &05EC
+ctu.port:      DEFW &06EC
+ctl.port:      DEFW &07EC
+
+mr1.init:      DEFB %11010011
+mr2.init:      DEFB %00010111
+csr.init:      DEFB %11001100
+
+ansi.here:     EQU  $
+
+               DEFS ansi.here+255/256*256-ansi.here
+
+ansi.stacks:   DEFS 256
+
+
+font6x8:       MDAT "ANSI_6x8.F"
+
+ansi.table:    DEFW Acode,Bcode,Ccode,Dcode,inval,inval,inval
+               DEFW Hcode,inval,Jcode,Kcode,inval,inval,inval
+               DEFW inval,inval,inval,inval,inval,inval,inval
+               DEFW inval,inval,inval,inval,inval
+               DEFW inval,inval,inval,inval,inval,inval
+               DEFW inval,inval,inval,inval,inval,fcode,inval
+               DEFW inval,inval,inval,inval,inval,mcode_1,ncode
+               DEFW inval,inval,inval,inval,scode,inval,ucode
+               DEFW inval,inval,inval,inval,inval
+
+colour.table:
+               DEFB c0,c0
+;0 0
+               DEFB c1,c0
+;1 0
+               DEFB c1,c0
+;2 0
+               DEFB c1,c0
+;3 0
+               DEFB c2,c0
+;4 0
+               DEFB c2,c0
+;5 0
+               DEFB c3,c0
+;6 0
+               DEFB c3,c0
+;7 0
+               DEFB c0,c1
+;0 1
+               DEFB c1,c0
+;1 1
+               DEFB c1,c0
+;2 1
+               DEFB c1,c0
+;3 1
+               DEFB c2,c0
+;4 1
+               DEFB c2,c0
+;5 1
+               DEFB c3,c0
+;6 1
+               DEFB c3,c0
+;7 1
+               DEFB c0,c1
+;0 2
+               DEFB c0,c1
+;1 2
+               DEFB c1,c1
+;2 2
+               DEFB c2,c1
+;3 2
+               DEFB c2,c1
+;4 2
+               DEFB c2,c1
+;5 2
+               DEFB c3,c1
+;6 2
+               DEFB c3,c1
+;7 2
+               DEFB c0,c1
+;0 3
+               DEFB c0,c1
+;1 3
+               DEFB c0,c1
+;2 3
+               DEFB c1,c1
+;3 3
+               DEFB c2,c1
+;4 3
+               DEFB c2,c1
+;5 3
+               DEFB c3,c1
+;6 3
+               DEFB c3,c1
+;7 3
+               DEFB c0,c2
+;0 4
+               DEFB c1,c2
+;1 4
+               DEFB c1,c2
+;2 4
+               DEFB c1,c2
+;3 4
+               DEFB c2,c2
+;4 4
+               DEFB c2,c1
+;5 4
+               DEFB c3,c2
+;6 4
+               DEFB c3,c2
+;7 4
+               DEFB c0,c2
+;0 5
+               DEFB c1,c2
+;1 5
+               DEFB c1,c2
+;2 5
+               DEFB c1,c2
+;3 5
+               DEFB c1,c2
+;4 5
+               DEFB c2,c2
+;5 5
+               DEFB c3,c2
+;6 5
+               DEFB c3,c2
+;7 5
+               DEFB c0,c3
+;0 6
+               DEFB c1,c3
+;1 6
+               DEFB c1,c3
+;2 6
+               DEFB c1,c3
+;3 6
+               DEFB c2,c3
+;4 6
+               DEFB c2,c3
+;5 6
+               DEFB c3,c3
+;6 6
+               DEFB c3,c2
+;7 6
+               DEFB c0,c3
+;0 7
+               DEFB c1,c3
+;1 7
+               DEFB c1,c3
+;2 7
+               DEFB c1,c3
+;3 7
+               DEFB c2,c3
+;4 7
+               DEFB c2,c3
+;5 7
+               DEFB c2,c2
+;6 7
+               DEFB c3,c3
+;7 7
+
+colour.swap:
+               DEFB 0,2,4,6,1,3,5,7
+
+
+;Dumb chat session messages...
+;-----------------------------
+
+dumbchat.msg:
+               DEFB ff
+               DEFM "Termite Chat System - TTY mode"
+               DEFB cr,lf
+               DEFM "------------------------------"
+               DEFB cr,lf,cr,lf
+               DEFM "To exit the chat system at any time, "
+               DEFM "press CTRL-X, CTRL-C or CTRL-D."
+               DEFB cr,lf,cr,lf
+               DEFM "Please enter your name: >        <"
+               DEFB 8,8,8,8,8,8,8,8,8
+               DEFB 0
+
+wait.dumbchat: DEFB cr,lf,cr,lf
+               DEFM "Please wait for the remote user to login"
+               DEFM "."
+               DEFB 0
+
+othr.dumbchat: DEFM "<  *User "
+               DEFB quote
+lenoth1:       EQU  $-othr.dumbchat
+               DEFB 0
+oth2.dumbchat: DEFB quote
+
+               DEFM " is waiting for you*"
+lenoth2:       EQU  $-oth2.dumbchat
+               DEFB BEL
+;ring that bell!
+               DEFB 0
+
+oth3.dumbchat: DEFB cr,lf,cr,lf
+               DEFM "*User "
+               DEFB quote,0
+oth4.dumbchat: DEFB quote
+               DEFM " has logged in*"
+               DEFB BEL
+startdumbchat:
+               DEFB cr,lf,cr,lf
+               DEFM "*** START OF CHAT SESSION ***"
+               DEFB cr,lf
+               DEFB 0
+
+abortdumbchat: DEFB cr,lf,cr,lf
+               DEFM "*** CHAT SESSION ABORTED ***"
+               DEFB cr,lf,cr,lf
+               DEFB 0
+
+;end of message marker
+
+enddumb1:
+               DEFB cr,lf,cr,lf
+               DEFM "Chat session closed by "
+               DEFB &FF
+               DEFB 0
+
+enddumbchat:   DEFB cr,lf,cr,lf,BEL
+               DEFM "*** END OF CHAT SESSION ***"
+               DEFB cr,lf,cr,lf
+               DEFM "Termite Chat Server v1.0 --- Copyright"
+               DEFM " (C) 1996 Simon Cooke"
+               DEFB cr,lf,cr,lf
+               DEFB 0
+
+delchr.dmch:   DEFB BACKSPACE," ",BACKSPACE,0
+
+sendmsg.dmch:  DEFB cr,&FE
+;send local name...
+               DEFM "> "
+chatedit2:     DEFB cr,lf
+chateditmark:  DEFM "========> "
+               DEFB 0
+
+rewrmsg.dmch:  DEFB cr,&FF
+;send remote name
+               DEFM ": "
+               DEFB 0
+
+
+;NB: Remote name /MUST/ come before local name for init code...
+;Max 8 chars per name...
+
+;01234567
+remotename:    DEFM "########"
+               DEFB 0
+localname:     DEFM "########"
+               DEFB 0
+
+flags:         DEFB 0
+flags2:        DEFB 0
+
+kbuff:         DEFW 0,0,0,0,0,0,0,0,0
+kdata:         DEFB 0
+lkpb:          DEFW 0
+repct:         DEFB 0
+lastkv:        DEFW 0
+lastk:         DEFB 0
+repdel:        DEFB 22
+repper:        DEFB 2
+
+nlasth:        DEFS 3
+
+kbqb:          DEFW 0,0,0,0
+kbqp:          DEFW 0
+
+kbtab:
+;Unshifted keys
+
+               DEFB NKY,INV,EDIT,F0,BACKSPACE,CAPS,F9,F6,F3
+               DEFB NKY,".",":",QUOTES,"+",TAB,F8,F5,F2
+               DEFB NKY,",",";","=","-",ESCAPE,F7,F4,F1
+               DEFB RIGHT,"b","h","y","6","5","t","g","v"
+               DEFB LEFT,"n","j","u","7","4","r","f","c"
+               DEFB UP,"m","k","i","8","3","e","d","x"
+               DEFB DOWN,SYM,"l","o","9","2","w","s","z"
+               DEFB CNTRL,SPACE,RETURN,"p","0","1","q","a"
+               DEFB SHIFT
+
+;Edit keys
+
+               DEFB NKY,INV,EDIT,F0,BACKSPACE,CAPS,F9,F6,F3
+               DEFB NKY,".",":",QUOTES,"+",MANDIAL,F8,F5,F2
+               DEFB NKY,",",";","=","-",SENDBREAK,F7,F4,HELP
+               DEFB RIGHT,"b","h",CHATMODE
+               DEFB "6","5","t","g","v"
+               DEFB LEFT,"n","j","u","7","4","r","f",RESET
+               DEFB UP,"m","k","i","8","3",ECHOMODE,PHBOOK,EXIT
+               DEFB DOWN,SYM,"l","o","9",SCRFLASH
+               DEFB WRAPMODE,"s","z"
+               DEFB CNTRL,SPACE,RETURN,"p","0",SNDTOGL,"q","a"
+               DEFB SHIFT
+
+;Keys + symbol
+
+               DEFB NKY,"|",EDIT,"0",DELETE,CAPS,"9","6","3"
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,"8","5","2"
+               DEFB NKY,"<",";","_","/",DEBUGMODE,"7","4","1"
+               DEFB END,NKY,"^",NKY,"&","%","]","}",NKY
+               DEFB HOME,NKY,NKY,NKY,"'","$","[","{",NKY
+               DEFB PAGEUP,NKY,NKY,NKY,"(","#",NKY,NKY,"?"
+               DEFB PAGEDOWN,SYM,"`",NKY,")","@",">",NKY,NKY
+               DEFB CNTRL,SPACE,RETURN,NKY,"~","!","<",NKY
+               DEFB SHIFT
+
+;Keys + symbol + edit
+
+               DEFB NKY,"|",EDIT,"0",DELETE,CAPS,"9","6","3"
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,"8","5","2"
+               DEFB NKY,"<",";","_","/",ESCAPE,"7","4","1"
+               DEFB RIGHT,NKY,"^",NKY,"&","%","]","}",NKY
+               DEFB LEFT,NKY,NKY,NKY,"'","$","[","{",NKY
+               DEFB UP,NKY,NKY,NKY,"(","#",NKY,NKY,"?"
+               DEFB DOWN,SYM,"`",NKY,")","@",">",NKY,NKY
+               DEFB CNTRL,SPACE,RETURN,NKY,"~","!","<",NKY
+               DEFB SHIFT
+
+;Keys + Cntrl
+
+               DEFB NKY,NKY,NKY,NKY,DELETE,CAPS,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,NKY,NKY,ESCAPE,NKY,NKY,NKY
+               DEFB RIGHT,STX,BS,EM,NKY,NKY,DC4,BEL,SYN
+               DEFB LEFT,SO,LF,NAK,NKY,NKY,DC2,ACK,ETX
+               DEFB UP,CR,VT,HT,NKY,NKY,ENQ,EOT,CAN
+               DEFB DOWN,SYM,FF,SI,NKY,NKY,ETB,DC3,SUBB
+               DEFB CNTRL,SPACE,RETURN,DLE,NKY,NKY,DC1,SOH
+               DEFB SHIFT
+
+;Keys + Cntrl + Edit
+
+               DEFB NKY,NKY,NKY,NKY,DELETE,CAPS,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,NKY,NKY,ESCAPE,NKY,NKY,NKY
+               DEFB RIGHT,STX,BS,EM,NKY,NKY,DC4,BEL,SYN
+               DEFB LEFT,SO,LF,NAK,NKY,NKY,DC2,ACK,ETX
+               DEFB UP,CR,VT,HT,NKY,NKY,ENQ,EOT,CAN
+               DEFB DOWN,SYM,FF,SI,NKY,NKY,ETB,DC3,SUBB
+               DEFB CNTRL,SPACE,RETURN,DLE,NKY,NKY,DC1,SOH
+               DEFB SHIFT
+
+;Keys + Symbol + Cntrl
+
+               DEFB NKY,FS,NKY,NKY,DELETE,CAPS,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,US,NKY,ESCAPE,NKY,NKY,NKY
+               DEFB RIGHT,NKY,RS,NKY,NKY,NKY,GS,NKY,NKY
+               DEFB LEFT,NKY,NKY,NKY,NKY,NKY,ESCAPE,NKY,NKY
+               DEFB UP,NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY
+               DEFB DOWN,SYM,NKY,NKY,NKY,NUL,NKY,NKY,NKY
+               DEFB CNTRL,SPACE,RETURN,NKY,NKY,NKY,NKY,NKY
+               DEFB SHIFT
+
+;Keys + Symbol + Cntrl
+
+               DEFB NKY,FS,NKY,NKY,DELETE,CAPS,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY
+               DEFB NKY,NKY,NKY,US,NKY,ESCAPE,NKY,NKY,NKY
+               DEFB RIGHT,NKY,RS,NKY,NKY,NKY,GS,NKY,NKY
+               DEFB LEFT,NKY,NKY,NKY,NKY,NKY,ESCAPE,NKY,NKY
+               DEFB UP,NKY,NKY,NKY,NKY,NKY,NKY,NKY,NKY
+               DEFB DOWN,SYM,NKY,NKY,NKY,NUL,NKY,NKY,NKY
+               DEFB CNTRL,SPACE,RETURN,NKY,NKY,NKY,NKY,NKY
+               DEFB SHIFT
+
+;Keys + shift
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB SHRIGHT,"B","H","Y","&","%","T","G","V"
+               DEFB SHLEFT,"N","J","U","'","$","R","F","C"
+               DEFB SHUP,"M","K","I","(","#","E","D","X"
+               DEFB SHDOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+;Keys + shift + EDIT
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB RIGHT,"B","H","Y","&","%","T","G","V"
+               DEFB LEFT,"N","J","U","'","$","R","F","C"
+               DEFB UP,"M","K","I","(","#","E","D","X"
+               DEFB DOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+;Keys + shift +SYMBOL
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB SHEND,"B","H","Y","&","%","T","G","V"
+               DEFB SHHOME,"N","J","U","'","$","R","F","C"
+               DEFB UP,"M","K","I","(","#","E","D","X"
+               DEFB DOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+;Keys + shift
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB RIGHT,"B","H","Y","&","%","T","G","V"
+               DEFB LEFT,"N","J","U","'","$","R","F","C"
+               DEFB UP,"M","K","I","(","#","E","D","X"
+               DEFB DOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+;Keys + shift
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB RIGHT,"B","H","Y","&","%","T","G","V"
+               DEFB LEFT,"N","J","U","'","$","R","F","C"
+               DEFB UP,"M","K","I","(","#","E","D","X"
+               DEFB DOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+;Keys + shift
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB RIGHT,"B","H","Y","&","%","T","G","V"
+               DEFB LEFT,"N","J","U","'","$","R","F","C"
+               DEFB UP,"M","K","I","(","#","E","D","X"
+               DEFB DOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+;Keys + shift
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB RIGHT,"B","H","Y","&","%","T","G","V"
+               DEFB LEFT,"N","J","U","'","$","R","F","C"
+               DEFB UP,"M","K","I","(","#","E","D","X"
+               DEFB DOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+;Keys + shift
+
+               DEFB NKY,"|",EDIT,F0,DELETE,CAPS,F9,F6,F3
+               DEFB NKY,">",":",COPYRIGHT,"*",TAB,F8,F5,F2
+               DEFB NKY,"<",";","_","/",ESCAPE,F7,F4,F1
+               DEFB RIGHT,"B","H","Y","&","%","T","G","V"
+               DEFB LEFT,"N","J","U","'","$","R","F","C"
+               DEFB UP,"M","K","I","(","#","E","D","X"
+               DEFB DOWN,SYM,"L","O",")","@","W","S","Z"
+               DEFB CNTRL,SPACE,RETURN,"P","~","!","Q","A"
+               DEFB SHIFT
+
+int.test:      DEFB 0
+tx.q.head:     DEFW 0
+tx.q.tail:     DEFW 0
+rx.q.head:     DEFW 0
+rx.q.tail:     DEFW 0
+cint.mask:     DEFB 0
+receiveseenq:  DEFW rxoldq
+
+bell.sound:    DEFB 0
+
+
+;Font make table...
+;------------------
+
+;offset * 2, + n
+;n = 0 for left nybble
+;n = 1 for right nybble
+
+make6x8:
+
+;Even table
+               DEFB 0,4,8,12,14,10,6,2
+               DEFB 3,7,11,15,13,9,5,1
+;Odd table
+               DEFB 1,5,9,13,15,11,7,3
+               DEFB 2,6,10,14,12,8,4,0
+
+fonttable:
+               DEFB %00000000
+               DEFB %00000011
+               DEFB %00001100
+               DEFB %00001111
+               DEFB %00110000
+               DEFB %00110011
+               DEFB %00111100
+               DEFB %00111111
+               DEFB %11000000
+               DEFB %11000011
+               DEFB %11001100
+               DEFB %11001111
+               DEFB %11110000
+               DEFB %11110011
+               DEFB %11111100
+               DEFB %11111111
+
+scratcharea:   DEFS 512
+;512 byte scratch area for data
+;copying / transfer operations...
+
+mirror.screen: DEFS 80*3*30
+;mirror screen buffer area...
+statusline:    DEFS 80*3
+;status line...
+
+
+;mirror.ltable: DEFS 31*2
+mirror.ltable: EQU  &6500
+;start address of mirror lines...
+;line 31 is the status line...
+
+;Data stored as CHARACTER,XORCOLOUR,COLOUR ?
+
+cursorflag:    DEFB 0
+fifotest:      DEFB 0
+
+
+debugboxx:     EQU  1
+debugboxy:     EQU  5
+debugboxh:     EQU  13
+debugboxw:     EQU  72
+helpboxx:      EQU  0
+helpboxy:      EQU  0
+helpboxh:      EQU  24
+helpboxw:      EQU  80
+mandialx:      EQU  11
+mandialy:      EQU  8
+mandialh:      EQU  5
+mandialw:      EQU  56
+phonebkx:      EQU  0
+phonebky:      EQU  0
+phonebkh:      EQU  24
+phonebkw:      EQU  80
+
+
+local.show:    EQU  put.ansi
+remote.show:   EQU  put.data2
+wrapcolumn:    EQU  69
+;column to wrap text at...
+chatlinel:     EQU  wrapcolumn
+elinel:        EQU  80
+;max edit line length...
+maxname:       EQU  8
+;max chars in name = 8...
+localflag:     EQU  128
+;flag bits in chatflags...
+remoteflag:    EQU  64
+;indicates when a name has been typed
+namechatflags: EQU  localflag+remoteflag
+
+;Buffer space for chat server edit lines...
+
+chatline.in:   DEFS chatlinel
+chatline.out:  DEFS chatlinel
+
+chatin.pos:    DEFB 0
+chatout.pos:   DEFB 0
+
+chatin.adr:    DEFW chatline.in
+chatout.adr:   DEFW chatline.out
+localnm.ad:    DEFW localname
+;current names...
+remotenm.ad:   DEFW remotename
+
+;Buffer space for editor line
+
+editline.pos:  DEFB 0
+;position in line for remote system
+editlinexy:    DEFW 0
+maxeditlen:    DEFB 0
+;max length of edit string...
+editline.len:  DEFB 0
+editline.buf:  DEFS elinel
+
+;Buffer space for clipboard
+
+clipline.len:  DEFB 0
+clipline.buf:  DEFS elinel
+;clipboard buffer area..
+
+infojiffies:   DEFB 100
+
+infoboxhl:     DEFB 205
+infoboxvl:     DEFB 186
+infoboxtl:     DEFB 201
+infoboxtr:     DEFB 187
+infoboxbl:     DEFB 200
+infoboxbr:     DEFB 188
+infoboxx:      EQU  22
+infoboxy:      EQU  8
+infoboxw:      EQU  36
+infoboxh:      EQU  7
+infoboxwh:     EQU  infoboxh*256+infoboxw
+infoboxxy:     EQU  infoboxy*256+infoboxx
+
+flash_on:      DEFM "Flash if sound occurs is now ON"
+               DEFB 0
+
+flash_off:     DEFM "Flash if sound occurs is now OFF"
+               DEFB 0
+
+sound_on:      DEFM "Sound is now ON"
+               DEFB 0
+
+sound_off:     DEFM "Sound is now OFF"
+               DEFB 0
+
+localecho_on:  DEFM "Local Echo is now ON"
+               DEFB 0
+
+localecho_off: DEFM "Local Echo is now OFF"
+               DEFB 0
+
+baddialstring:
+               DEFM "ENOT LAID ON"
+               DEFB 0
+               DEFM "REIRREC ON"
+               DEFB 0
+               DEFM "ECOIV"
+               DEFB 0
+               DEFM "RORRE"
+               DEFB 0
+               DEFM "YSUB"
+               DEFB 0,0
+
+gooddialstring:
+               DEFM "TCENNOC"
+               DEFB 0,0
+
+dialprefix:    DEFM "ATDT"
+               DEFB 0
+
+initstring:    DEFM "ATZ"
+               DEFB cr,0
+
+dialsuffix:    DEFB cr
+               DEFB 0
+
+debugpoint:    DEFM "Last incoming characters:"
+               DEFB 0
+
+debugpoint2:
+               DEFB "<",&C4,&C4
+               DEFB 0
+
+phonebktitle:  DEFM "Phone Directory"
+               DEFB 0
+
+debugtitle:    DEFM "Debugger / Status Screen"
+               DEFB 0
+
+mandialtitle:  DEFM "Quick Dialler"
+               DEFB 0
+
+mandial1.msg:  DEFM "Enter Number: "
+               DEFB 0
+mandialnumber:
+               DEFM "0161 955 8200                         "
+mandialmax:    EQU  $-mandialnumber
+               DEFB 0
+
+mandialnumlen: DEFB 13
+
+mandialstatus: DEFM "ESC cancels, EDIT-D Directory"
+               DEFM ", EDIT-F1 Help"
+               DEFB 0
+
+helptitle:     DEFM "Online help system"
+               DEFB 0
+helpstatus:    DEFM "Cursors scroll text, RETURN selects topics"
+               DEFM ". File: "
+               DEFM "General     "
+               DEFM "  10%"
+               DEFB 0
+
+
